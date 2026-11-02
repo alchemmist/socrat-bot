@@ -70,7 +70,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     if query is None or query.data is None or not query.data.startswith("act:"):
         return
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     actor = str(query.from_user.id)
     action_id = uuid.UUID(query.data.removeprefix("act:"))
     with session() as db:
@@ -143,6 +146,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 async def post_message(body: OutMessage, x_internal_token: str | None = Header(default=None)):
     require_internal(x_internal_token)
     buttons: list[tuple[str, str]] = []
+    rows = []
     with session() as db:
         for item in body.actions:
             row = create_action(
@@ -152,10 +156,21 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                 chat_id=body.chat_id,
                 idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()),
             )
+            rows.append(row)
             buttons.append((item.get("label") or row.type, f"act:{row.id}"))
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         markup = keyboard(buttons)
+        existing = next((row.message_id for row in rows if row.message_id), None)
         async with httpx.AsyncClient(timeout=20) as client:
+            if existing is not None:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/editMessageText",
+                    json={"chat_id": body.chat_id, "message_id": existing, "text": body.text, "reply_markup": markup.to_dict() if markup else None},
+                )
+                data = response.json()
+                if not data.get("ok") and "message is not modified" not in str(data):
+                    raise HTTPException(status_code=502, detail=data)
+                return {"id": existing, "chat_id": body.chat_id, "replayed": True}
             payload = {"chat_id": body.chat_id, "text": body.text}
             if markup:
                 payload["reply_markup"] = markup.to_dict()
@@ -164,10 +179,8 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
             if not data.get("ok"):
                 raise HTTPException(status_code=502, detail=data)
             message_id = data["result"]["message_id"]
-            for _, data_cb in buttons:
-                action = db.get(Action, uuid.UUID(data_cb.removeprefix("act:")))
-                if action:
-                    action.message_id = message_id
+            for row in rows:
+                row.message_id = message_id
     return {"id": message_id, "chat_id": body.chat_id}
 
 
