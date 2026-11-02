@@ -1,0 +1,230 @@
+import hashlib
+import json
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from socrat_bot.models import Action, Audit, Broadcast, LinkCode, SudoRequest, User, utcnow
+
+ACTION_TYPES = {
+    "alert.silence",
+    "broadcast.send",
+    "broadcast.cancel",
+    "xui.upgrade",
+    "sudo.approve",
+    "sudo.deny",
+}
+
+
+def owner_ids() -> set[int]:
+    raw = os.environ.get("TELEGRAM_OWNER_ID", "").strip()
+    return {int(raw)} if raw else set()
+
+
+def ensure_owner(db: Session, telegram_id: int) -> User | None:
+    user = db.scalar(select(User).where(User.telegram_id == telegram_id))
+    if telegram_id in owner_ids():
+        if user is None:
+            user = User(telegram_id=telegram_id, role="owner", alerts_enabled=True)
+            db.add(user)
+        else:
+            user.role = "owner"
+        db.flush()
+    return user
+
+
+def is_owner(db: Session, telegram_id: int) -> bool:
+    user = ensure_owner(db, telegram_id)
+    return user is not None and user.role == "owner"
+
+
+def audit(db: Session, actor: str, event: str, detail: dict) -> None:
+    db.add(Audit(actor=actor, event=event, detail=detail))
+
+
+def create_action(
+    db: Session,
+    *,
+    type_: str,
+    payload: dict,
+    chat_id: int,
+    idempotency_key: str,
+    message_id: int | None = None,
+    ttl_seconds: int | None = None,
+) -> Action:
+    existing = db.scalar(select(Action).where(Action.idempotency_key == idempotency_key))
+    if existing:
+        return existing
+    expires = utcnow() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
+    row = Action(
+        type=type_,
+        payload=payload,
+        chat_id=chat_id,
+        message_id=message_id,
+        idempotency_key=idempotency_key,
+        expires_at=expires,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def argv_hash(argv: list[str]) -> str:
+    return hashlib.sha256(json.dumps(argv, ensure_ascii=False).encode()).hexdigest()
+
+
+def issue_link_code(db: Session, panel_client_id: str, ttl_seconds: int = 900) -> str:
+    code = uuid.uuid4().hex[:16]
+    db.add(
+        LinkCode(
+            code=code,
+            panel_client_id=panel_client_id,
+            expires_at=utcnow() + timedelta(seconds=ttl_seconds),
+        )
+    )
+    db.flush()
+    return code
+
+
+def consume_link(db: Session, telegram_id: int, code: str) -> str:
+    row = db.get(LinkCode, code)
+    now = datetime.now(timezone.utc)
+    if row is None or row.used_by is not None or row.expires_at.replace(tzinfo=timezone.utc) < now:
+        return "invalid"
+    user = db.scalar(select(User).where(User.telegram_id == telegram_id))
+    if user is None:
+        user = User(telegram_id=telegram_id, role="vpn")
+        db.add(user)
+    if user.role != "owner":
+        user.role = "vpn"
+    user.panel_client_id = row.panel_client_id
+    row.used_by = telegram_id
+    audit(db, str(telegram_id), "vpn.link", {"panel_client_id": row.panel_client_id})
+    return "linked"
+
+
+def vpn_audience(db: Session) -> list[User]:
+    return list(
+        db.scalars(
+            select(User).where(User.role == "vpn", User.panel_client_id.is_not(None))
+        )
+    )
+
+
+async def apply_action(db: Session, action: Action, actor: str) -> dict:
+    if action.status != "pending":
+        stored = dict(action.result or {})
+        stored["replayed"] = True
+        stored.setdefault("status", action.status)
+        return stored
+    if action.expires_at and as_utc(action.expires_at) < datetime.now(timezone.utc):
+        action.status = "expired"
+        action.result = {"status": "expired"}
+        return action.result
+    action.status = "running"
+    db.flush()
+    try:
+        result = await _dispatch(db, action)
+    except Exception as exc:
+        action.status = "failed"
+        action.result = {"status": "failed", "error": str(exc)}
+        audit(db, actor, action.type, action.result)
+        return action.result
+    action.status = "done"
+    action.result = result
+    audit(db, actor, action.type, result)
+    return result
+
+
+async def _dispatch(db: Session, action: Action) -> dict:
+    if action.type == "alert.silence":
+        return await _silence(action.payload)
+    if action.type == "broadcast.send":
+        return await _broadcast(db, action)
+    if action.type == "broadcast.cancel":
+        row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
+        if row:
+            row.status = "cancelled"
+        return {"status": "cancelled"}
+    if action.type == "xui.upgrade":
+        return await _upgrade()
+    if action.type == "sudo.approve":
+        return _sudo_decision(db, action, "approved")
+    if action.type == "sudo.deny":
+        return _sudo_decision(db, action, "denied")
+    raise ValueError(f"unknown action {action.type}")
+
+
+async def _silence(payload: dict) -> dict:
+    base = os.environ.get("ALERTMANAGER_URL", "http://kube-prometheus-stack-alertmanager.cattle-monitoring-system.svc:9093")
+    ends = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    body = {
+        "matchers": payload.get("matchers") or [{"name": "alertname", "value": payload.get("alertname", ".*"), "isRegex": True}],
+        "startsAt": datetime.now(timezone.utc).isoformat(),
+        "endsAt": ends,
+        "createdBy": "socrat-bot",
+        "comment": "silenced for one hour from Telegram",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(f"{base}/api/v2/silences", json=body)
+        response.raise_for_status()
+        return {"status": "silenced", "silence": response.json()}
+
+
+async def _broadcast(db: Session, action: Action) -> dict:
+    row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
+    if row is None or row.status not in {"draft", "preview"}:
+        return {"status": "skipped", "reason": "not a draft"}
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    pause = float(os.environ.get("BROADCAST_PAUSE_SECONDS", "0.4"))
+    sent = 0
+    failed: list[int] = []
+    import asyncio
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        for user in vpn_audience(db):
+            response = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": user.telegram_id, "text": row.text},
+            )
+            if response.status_code == 200 and response.json().get("ok"):
+                sent += 1
+            else:
+                failed.append(user.telegram_id)
+            await asyncio.sleep(pause)
+    row.status = "sent"
+    row.sent = sent
+    row.failed = failed
+    return {"status": "sent", "sent": sent, "failed": failed}
+
+
+async def _upgrade() -> dict:
+    base = os.environ.get("XUI_UPDATER_URL", "http://socrat-bot-xui-updater.socrat-bot.svc:8080")
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(f"{base}/upgrade")
+        response.raise_for_status()
+        return response.json()
+
+
+def _sudo_decision(db: Session, action: Action, status: str) -> dict:
+    row = db.get(SudoRequest, uuid.UUID(action.payload["request_id"]))
+    if row is None:
+        return {"status": "missing"}
+    # Approved and consumed stay closed: a second click must not reopen the request.
+    if row.status != "pending":
+        return {"status": row.status, "replayed": True, "request_id": str(row.id)}
+    if as_utc(row.expires_at) <= datetime.now(timezone.utc):
+        row.status = "expired"
+        return {"status": "expired", "request_id": str(row.id)}
+    row.status = status
+    return {"status": status, "request_id": str(row.id), "argv": row.argv, "node": row.node}

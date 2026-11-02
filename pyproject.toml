@@ -1,0 +1,35 @@
+[project]
+name = "socrat-bot"
+version = "0.1.0"
+description = "Telegram control plane for the Socrat homelab"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "httpx>=0.27",
+  "sqlalchemy>=2.0",
+  "alembic>=1.14",
+  "psycopg[binary]>=3.2",
+  "python-telegram-bot>=21.6,<22",
+  "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3"]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+socrat-sudo = "socrat_sudo.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
