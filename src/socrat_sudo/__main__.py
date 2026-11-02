@@ -54,16 +54,16 @@ def _run(argv: list[str]) -> int:
                 return completed.returncode
             status = body.get("status")
             if status == "denied":
-                print("socrat-sudo: запрос отклонён", file=sys.stderr)
+                print("socrat-sudo: request denied", file=sys.stderr)
                 return 2
             if status == "expired":
-                print("socrat-sudo: запрос истёк", file=sys.stderr)
+                print("socrat-sudo: request expired", file=sys.stderr)
                 return 3
             if status == "consumed":
-                print("socrat-sudo: запрос уже использован", file=sys.stderr)
+                print("socrat-sudo: request already used", file=sys.stderr)
                 return 1
             if time.monotonic() >= deadline:
-                print("socrat-sudo: время ожидания истекло", file=sys.stderr)
+                print("socrat-sudo: wait timed out", file=sys.stderr)
                 return 3
             time.sleep(min(_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
@@ -84,7 +84,7 @@ def _report_exit(
         )
         result.raise_for_status()
     except httpx.HTTPError as exc:
-        print(f"socrat-sudo: не удалось записать код выхода: {exc}", file=sys.stderr)
+        print(f"socrat-sudo: failed to record the exit code: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

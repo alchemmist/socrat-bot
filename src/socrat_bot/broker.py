@@ -75,7 +75,7 @@ def create_sudo(body: SudoIn, x_internal_token: str | None = Header(default=None
     shown = shlex.join(body.argv)
     if len(shown) > 3000:
         shown = shown[:3000] + "…"
-    text = f"Запрос sudo\nузел: {body.node}\nпользователь: {body.user}\n{shown}"
+    text = f"Sudo request\nnode: {body.node}\nuser: {body.user}\n{shown}"
     with session() as db:
         row = SudoRequest(
             user_name=body.user,
@@ -110,8 +110,8 @@ def create_sudo(body: SudoIn, x_internal_token: str | None = Header(default=None
         )
         markup = {
             "inline_keyboard": [
-                [{"text": "Разрешить", "callback_data": f"act:{approve.id}"}],
-                [{"text": "Отклонить", "callback_data": f"act:{deny.id}"}],
+                [{"text": "Allow", "callback_data": f"act:{approve.id}"}],
+                [{"text": "Deny", "callback_data": f"act:{deny.id}"}],
             ]
         }
         response = httpx.post(

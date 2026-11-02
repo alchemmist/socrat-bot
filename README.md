@@ -1,18 +1,18 @@
 # socrat-bot
 
-Управляющий контур домашнего кластера Socrat. Один образ, три процесса.
+Control plane for the Socrat homelab cluster. One image, three processes.
 
-## Процессы
+## Processes
 
-- `python -m socrat_bot` — Telegram-бот и HTTP API управляющего контура. Эта команда стоит в образе по умолчанию, процесс слушает порт 8080.
-- `python -m uvicorn socrat_bot.broker:api --host 0.0.0.0 --port 8080` — брокер sudo. Принимает запрос клиента, спрашивает владельца в Telegram и отдаёт разрешение на запуск.
-- `python -m socrat_bot.updater` — проверка и обновление образа панели 3X-UI.
+- `python -m socrat_bot` — Telegram bot and HTTP API for the control plane. This command is the image default; the process listens on port 8080.
+- `python -m uvicorn socrat_bot.broker:api --host 0.0.0.0 --port 8080` — sudo broker. It accepts a client request, asks the owner in Telegram, and returns permission to run.
+- `python -m socrat_bot.updater` — checks and updates the 3X-UI panel image.
 
-## Переменные окружения
+## Environment variables
 
-Секреты остаются вне git. В репозитории только имена; значения задаются окружением процесса или хранилищем секретов.
+Secrets stay out of git. The repository lists names only; values come from the process environment or a secret store.
 
-Бот:
+Bot:
 
 - `DATABASE_URL`
 - `PORT`
@@ -25,7 +25,7 @@
 - `BROADCAST_PAUSE_SECONDS`
 - `XUI_UPDATER_URL`
 
-Брокер:
+Broker:
 
 - `DATABASE_URL`
 - `INTERNAL_TOKEN`
@@ -33,7 +33,7 @@
 - `TELEGRAM_OWNER_ID`
 - `SUDO_TTL_MINUTES`
 
-Обновлятор:
+Updater:
 
 - `PORT`
 - `XUI_PANEL_PORT`
@@ -43,14 +43,14 @@
 - `XUI_UPGRADE_TIMEOUT_SECONDS`
 - `XUI_POLL_SECONDS`
 
-Клиент `socrat-sudo`:
+`socrat-sudo` client:
 
 - `BROKER_URL`
 - `INTERNAL_TOKEN`
 - `SUDO_WAIT_SECONDS`
 
-Для выкладки образа в GitHub Actions живут секреты `HARBOR_USERNAME`, `HARBOR_PASSWORD` и `HOMELAB_DEPLOY_KEY`.
+Image publish in GitHub Actions uses the secrets `HARBOR_USERNAME`, `HARBOR_PASSWORD`, and `HOMELAB_DEPLOY_KEY`.
 
 ## socrat-sudo
 
-Команда `socrat-sudo` стоит рядом с `sudo`. Она отправляет аргументы брокеру и вызывает `sudo` с теми же аргументами только после подтверждения. sudoers пока не ужат: прямой `sudo` по-прежнему доступен, клиент добавляет подтверждение в Telegram и не заменяет политику прав.
+The `socrat-sudo` command sits beside `sudo`. It sends the arguments to the broker and invokes `sudo` with the same arguments only after confirmation. sudoers is not tightened yet: plain `sudo` is still available. The client adds Telegram confirmation and does not replace the privilege policy.

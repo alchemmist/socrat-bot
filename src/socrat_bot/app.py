@@ -59,9 +59,9 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ensure_owner(db, user.id)
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
-            text = "Привязка сохранена." if outcome == "linked" else "Код недействителен или уже использован."
+            text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
         else:
-            text = "Socrat на связи."
+            text = "Socrat is online."
     await update.message.reply_text(text)
 
 
@@ -74,7 +74,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     action_id = uuid.UUID(query.data.removeprefix("act:"))
     with session() as db:
         if not is_owner(db, query.from_user.id):
-            await query.edit_message_text("Это действие доступно только владельцу.")
+            await query.edit_message_text("This action is available to the owner only.")
             return
         action = db.get(Action, action_id)
         if action is None:
@@ -87,17 +87,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 def _result_text(action: Action, result: dict) -> str:
     if action.type == "alert.silence":
-        return "Алерт замолчан на час." if result.get("status") == "silenced" else f"Тишина не выставлена: {result}"
+        return "Alert silenced for one hour." if result.get("status") == "silenced" else f"Silence was not set: {result}"
     if action.type == "xui.upgrade":
         if result.get("status") == "updated":
-            return f"3X-UI обновлён: {result.get('image')}"
+            return f"3X-UI updated: {result.get('image')}"
         if result.get("status") == "rolled_back":
-            return "Автоматика вернула рабочую версию. Дальше нужно смотреть вручную."
-        return f"Обновление: {result}"
+            return "Automation restored the working version. Further checks have to be done manually."
+        return f"Upgrade: {result}"
     if action.type == "broadcast.send":
-        return f"Рассылка: ушло {result.get('sent', 0)}, не приняли {result.get('failed', [])}"
+        return f"Broadcast: sent {result.get('sent', 0)}, not accepted {result.get('failed', [])}"
     if action.type == "broadcast.cancel":
-        return "Рассылка отменена."
+        return "Broadcast cancelled."
     if action.type in {"sudo.approve", "sudo.deny"}:
         return f"Sudo {result.get('status')}: {result.get('argv')}"
     return str(result)
@@ -221,8 +221,8 @@ async def broadcasts(body: BroadcastIn, x_internal_token: str | None = Header(de
             chat_id=body.chat_id,
             idempotency_key=f"broadcast-cancel-{row.id}",
         )
-        preview = f"Черновик рассылки:\n{body.text}"
-        markup = keyboard([("Отправить", f"act:{send.id}"), ("Отмена", f"act:{cancel.id}")])
+        preview = f"Broadcast draft:\n{body.text}"
+        markup = keyboard([("Send", f"act:{send.id}"), ("Cancel", f"act:{cancel.id}")])
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
