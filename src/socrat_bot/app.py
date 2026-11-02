@@ -18,8 +18,10 @@ ptb: Application | None = None
 
 class OutMessage(BaseModel):
     chat_id: int
-    text: str
+    text: str = ""
+    alerts: list[dict] = Field(default_factory=list)
     actions: list[dict] = Field(default_factory=list)
+    parse_mode: str | None = None
 
 
 class PatchMessage(BaseModel):
@@ -42,12 +44,51 @@ def require_internal(token: str | None) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-def keyboard(rows: list[tuple[str, str]]) -> InlineKeyboardMarkup | None:
+def keyboard(rows: list[tuple[str, str, int]]) -> InlineKeyboardMarkup | None:
     if not rows:
         return None
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(label, callback_data=data)] for label, data in rows]
-    )
+    grouped: dict[int, list[InlineKeyboardButton]] = {}
+    for label, data, row in rows:
+        grouped.setdefault(row, []).append(InlineKeyboardButton(label, callback_data=data))
+    return InlineKeyboardMarkup([grouped[index] for index in sorted(grouped)])
+
+
+def _esc(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def render_alerts(alerts: list[dict]) -> str:
+    firing = [item for item in alerts if item.get("status") != "resolved"]
+    resolved = [item for item in alerts if item.get("status") == "resolved"]
+    blocks: list[str] = []
+
+    def section(title: str, items: list[dict]) -> None:
+        if not items:
+            return
+        lines = [f"<b>{title}</b>  {len(items)}"]
+        for item in items[:8]:
+            name = _esc(str(item.get("name") or "alert"))
+            where = _esc(str(item.get("where") or ""))
+            summary = _esc(str(item.get("summary") or ""))
+            lines.append(f"<b>{name}</b>")
+            if where:
+                lines.append(f"<code>{where}</code>")
+            if summary:
+                lines.append(summary)
+            links = []
+            for label, url in (item.get("links") or {}).items():
+                if not url:
+                    continue
+                links.append(f'<a href="{_esc(str(url))}">{_esc(str(label))}</a>')
+            if links:
+                lines.append(" · ".join(links))
+        if len(items) > 8:
+            lines.append(f"+{len(items) - 8} more")
+        blocks.append("\n".join(lines))
+
+    section("Firing", firing)
+    section("Resolved", resolved)
+    return "\n\n".join(blocks)
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -86,12 +127,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         result = await apply_action(db, action, actor)
         text = _result_text(action, result)
         if action.message_id:
-            await context.bot.edit_message_text(text, chat_id=action.chat_id, message_id=action.message_id)
+            try:
+                await context.bot.edit_message_text(
+                    text,
+                    chat_id=action.chat_id,
+                    message_id=action.message_id,
+                    parse_mode="HTML" if action.payload.get("card") else None,
+                )
+            except Exception:
+                pass
 
 
 def _result_text(action: Action, result: dict) -> str:
     if action.type == "alert.silence":
-        return "Alert silenced for one hour." if result.get("status") == "silenced" else f"Silence was not set: {result}"
+        minutes = int((action.payload or {}).get("minutes") or 60)
+        span = {15: "15 minutes", 30: "30 minutes", 60: "1 hour"}.get(minutes, f"{minutes} minutes")
+        footer = f"Muted for {span}." if result.get("status") == "silenced" else f"Mute failed: {result}"
+        card = (action.payload or {}).get("card")
+        return f"{card}\n\n<i>{footer}</i>" if card else footer
     if action.type == "xui.upgrade":
         if result.get("status") == "updated":
             return f"3X-UI updated: {result.get('image')}"
@@ -145,33 +198,47 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 @api.post("/v1/messages")
 async def post_message(body: OutMessage, x_internal_token: str | None = Header(default=None)):
     require_internal(x_internal_token)
-    buttons: list[tuple[str, str]] = []
+    text = render_alerts(body.alerts) if body.alerts else body.text
+    if not text:
+        raise HTTPException(status_code=400, detail="text or alerts required")
+    parse_mode = "HTML" if body.alerts or body.parse_mode == "HTML" else body.parse_mode
+    buttons: list[tuple[str, str, int]] = []
     rows = []
     with session() as db:
         for item in body.actions:
+            payload = dict(item.get("payload") or {})
+            if body.alerts and item.get("type") == "alert.silence":
+                payload.setdefault("card", text)
             row = create_action(
                 db,
                 type_=item["type"],
-                payload=item.get("payload") or {},
+                payload=payload,
                 chat_id=body.chat_id,
                 idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()),
             )
             rows.append(row)
-            buttons.append((item.get("label") or row.type, f"act:{row.id}"))
+            buttons.append((item.get("label") or row.type, f"act:{row.id}", int(item.get("row") or 0)))
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         markup = keyboard(buttons)
         existing = next((row.message_id for row in rows if row.message_id), None)
         async with httpx.AsyncClient(timeout=20) as client:
             if existing is not None:
+                edit = {"chat_id": body.chat_id, "message_id": existing, "text": text}
+                if parse_mode:
+                    edit["parse_mode"] = parse_mode
+                if markup:
+                    edit["reply_markup"] = markup.to_dict()
                 response = await client.post(
                     f"https://api.telegram.org/bot{token}/editMessageText",
-                    json={"chat_id": body.chat_id, "message_id": existing, "text": body.text, "reply_markup": markup.to_dict() if markup else None},
+                    json=edit,
                 )
                 data = response.json()
                 if not data.get("ok") and "message is not modified" not in str(data):
                     raise HTTPException(status_code=502, detail=data)
                 return {"id": existing, "chat_id": body.chat_id, "replayed": True}
-            payload = {"chat_id": body.chat_id, "text": body.text}
+            payload = {"chat_id": body.chat_id, "text": text}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
             if markup:
                 payload["reply_markup"] = markup.to_dict()
             response = await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
@@ -236,7 +303,7 @@ async def broadcasts(body: BroadcastIn, x_internal_token: str | None = Header(de
             idempotency_key=f"broadcast-cancel-{row.id}",
         )
         preview = f"Broadcast draft:\n{body.text}"
-        markup = keyboard([("Send", f"act:{send.id}"), ("Cancel", f"act:{cancel.id}")])
+        markup = keyboard([("Send", f"act:{send.id}", 0), ("Cancel", f"act:{cancel.id}", 0)])
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(

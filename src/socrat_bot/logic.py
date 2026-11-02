@@ -171,13 +171,15 @@ async def _dispatch(db: Session, action: Action) -> dict:
 
 async def _silence(payload: dict) -> dict:
     base = os.environ.get("ALERTMANAGER_URL", "http://kube-prometheus-stack-alertmanager.cattle-monitoring-system.svc:9093")
-    ends = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    minutes = int(payload.get("minutes") or 60)
+    minutes = max(1, min(minutes, 24 * 60))
+    ends = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
     body = {
         "matchers": payload.get("matchers") or [{"name": "alertname", "value": payload.get("alertname", ".*"), "isRegex": True}],
         "startsAt": datetime.now(timezone.utc).isoformat(),
         "endsAt": ends,
         "createdBy": "socrat-bot",
-        "comment": "silenced for one hour from Telegram",
+        "comment": f"muted for {minutes} minutes from Telegram",
     }
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(f"{base}/api/v2/silences", json=body)
