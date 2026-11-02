@@ -57,6 +57,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     arg = context.args[0] if context.args else ""
     with session() as db:
         ensure_owner(db, user.id)
+        print(f"telegram_start id={user.id}", flush=True)
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."

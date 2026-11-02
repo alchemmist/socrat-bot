@@ -27,12 +27,16 @@ def owner_ids() -> set[int]:
 
 def ensure_owner(db: Session, telegram_id: int) -> User | None:
     user = db.scalar(select(User).where(User.telegram_id == telegram_id))
-    if telegram_id in owner_ids():
-        if user is None:
-            user = User(telegram_id=telegram_id, role="owner", alerts_enabled=True)
-            db.add(user)
-        else:
-            user.role = "owner"
+    configured = owner_ids()
+    has_owner = db.scalar(select(User.id).where(User.role == "owner")) is not None
+    promote = telegram_id in configured or (not configured and not has_owner)
+    if user is None and (promote or telegram_id in configured):
+        user = User(telegram_id=telegram_id, role="owner" if promote else "vpn", alerts_enabled=promote)
+        db.add(user)
+    elif user is not None and promote:
+        user.role = "owner"
+        user.alerts_enabled = True
+    if user is not None:
         db.flush()
     return user
 
