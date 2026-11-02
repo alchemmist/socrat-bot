@@ -186,3 +186,14 @@ def record_result(
             raise HTTPException(status_code=404, detail="not found")
         row.exit_code = body.exit_code
         return {"id": str(row.id), "exit_code": row.exit_code}
+
+
+def main() -> None:
+    import uvicorn
+
+    port = int(os.environ.get("PORT", "8080"))
+    uvicorn.run("socrat_bot.broker:api", host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    main()
