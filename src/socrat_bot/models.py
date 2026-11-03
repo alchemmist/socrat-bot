@@ -71,6 +71,15 @@ class Broadcast(Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
+class TelegramCard(Base):
+    __tablename__ = "telegram_cards"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="firing")
+
+
 class SudoRequest(Base):
     __tablename__ = "sudo_requests"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

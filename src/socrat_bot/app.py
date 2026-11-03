@@ -9,17 +9,36 @@ from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+from socrat_bot.cards import Card, Link, build_alert, mute_actions, render_card, select_links
 from socrat_bot.db import init_schema, session
-from socrat_bot.logic import apply_action, consume_link, create_action, ensure_owner, is_owner
+from socrat_bot.logic import apply_action, consume_link, create_action, ensure_owner, is_owner, open_card
 from socrat_bot.models import Action, Broadcast
 
 ptb: Application | None = None
+
+
+class Href(BaseModel):
+    label: str
+    url: str
+
+
+class CardIn(BaseModel):
+    key: str
+    title: str
+    where: str = ""
+    summary: str = ""
+    status: str = "firing"
+    labels: dict[str, str] = Field(default_factory=dict)
+    links: list[str] | None = None
+    hrefs: list[Href] = Field(default_factory=list)
 
 
 class OutMessage(BaseModel):
     chat_id: int
     text: str = ""
     alerts: list[dict] = Field(default_factory=list)
+    alert: dict | None = None
+    card: CardIn | None = None
     actions: list[dict] = Field(default_factory=list)
     parse_mode: str | None = None
 
@@ -53,42 +72,31 @@ def keyboard(rows: list[tuple[str, str, int]]) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([grouped[index] for index in sorted(grouped)])
 
 
-def _esc(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def render_alerts(alerts: list[dict]) -> str:
-    firing = [item for item in alerts if item.get("status") != "resolved"]
-    resolved = [item for item in alerts if item.get("status") == "resolved"]
-    blocks: list[str] = []
-
-    def section(title: str, items: list[dict]) -> None:
-        if not items:
-            return
-        lines = [f"<b>{title}</b>  {len(items)}"]
-        for item in items[:8]:
-            name = _esc(str(item.get("name") or "alert"))
-            where = _esc(str(item.get("where") or ""))
-            summary = _esc(str(item.get("summary") or ""))
-            lines.append(f"<b>{name}</b>")
-            if where:
-                lines.append(f"<code>{where}</code>")
-            if summary:
-                lines.append(summary)
-            links = []
-            for label, url in (item.get("links") or {}).items():
-                if not url:
-                    continue
-                links.append(f'<a href="{_esc(str(url))}">{_esc(str(label))}</a>')
-            if links:
-                lines.append(" · ".join(links))
-        if len(items) > 8:
-            lines.append(f"+{len(items) - 8} more")
-        blocks.append("\n".join(lines))
-
-    section("Firing", firing)
-    section("Resolved", resolved)
-    return "\n\n".join(blocks)
+def card_from_request(body: OutMessage) -> Card | None:
+    if body.alert is not None:
+        return build_alert(body.alert)
+    if len(body.alerts) == 1:
+        item = body.alerts[0]
+        if "labels" not in item:
+            item = {
+                "status": item.get("status"),
+                "name": item.get("name"),
+                "summary": item.get("summary") or "",
+                "labels": {},
+                "annotations": {"summary": item.get("summary") or ""},
+            }
+        return build_alert(item)
+    if body.card is None:
+        return None
+    raw = body.card
+    labels = dict(raw.labels)
+    if raw.links:
+        links = select_links(labels, raw.links)
+    else:
+        links = []
+    links = [*links, *[Link(item.label, item.url) for item in raw.hrefs]]
+    status = "resolved" if raw.status == "resolved" else "firing"
+    return Card(key=raw.key[:120], title=raw.title, where=raw.where, summary=raw.summary, status=status, links=links)
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -198,36 +206,58 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 @api.post("/v1/messages")
 async def post_message(body: OutMessage, x_internal_token: str | None = Header(default=None)):
     require_internal(x_internal_token)
-    text = render_alerts(body.alerts) if body.alerts else body.text
+    if len(body.alerts) > 1:
+        raise HTTPException(status_code=400, detail="one alert per message")
+    try:
+        card = card_from_request(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    text = render_card(card) if card is not None else body.text
     if not text:
-        raise HTTPException(status_code=400, detail="text or alerts required")
-    parse_mode = "HTML" if body.alerts or body.parse_mode == "HTML" else body.parse_mode
+        raise HTTPException(status_code=400, detail="text or alert required")
+    parse_mode = "HTML" if card is not None or body.parse_mode == "HTML" else body.parse_mode
     buttons: list[tuple[str, str, int]] = []
     rows = []
     with session() as db:
-        for item in body.actions:
-            payload = dict(item.get("payload") or {})
-            if body.alerts and item.get("type") == "alert.silence":
-                payload.setdefault("card", text)
+        stored = open_card(db, card.key, body.chat_id, card.firing) if card is not None else None
+        if card is not None and card.firing and not body.actions:
+            incoming = mute_actions(card, stored.generation if stored else 1)
+        else:
+            incoming = []
+            for item in body.actions:
+                copied = dict(item)
+                if card is not None and copied.get("type") == "alert.silence":
+                    payload = dict(copied.get("payload") or {})
+                    payload.setdefault("card", text)
+                    copied["payload"] = payload
+                incoming.append(copied)
+        for item in incoming:
             row = create_action(
                 db,
                 type_=item["type"],
-                payload=payload,
+                payload=dict(item.get("payload") or {}),
                 chat_id=body.chat_id,
                 idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()),
+                refresh=card is not None,
             )
             rows.append(row)
-            buttons.append((item.get("label") or row.type, f"act:{row.id}", int(item.get("row") or 0)))
+            if card is None or card.firing:
+                buttons.append((item.get("label") or row.type, f"act:{row.id}", int(item.get("row") or 0)))
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         markup = keyboard(buttons)
-        existing = next((row.message_id for row in rows if row.message_id), None)
+        existing = stored.message_id if stored is not None and stored.message_id else None
+        if existing is None:
+            existing = next((row.message_id for row in rows if row.message_id), None)
         async with httpx.AsyncClient(timeout=20) as client:
             if existing is not None:
-                edit = {"chat_id": body.chat_id, "message_id": existing, "text": text}
+                edit = {
+                    "chat_id": body.chat_id,
+                    "message_id": existing,
+                    "text": text,
+                    "reply_markup": markup.to_dict() if markup else {"inline_keyboard": []},
+                }
                 if parse_mode:
                     edit["parse_mode"] = parse_mode
-                if markup:
-                    edit["reply_markup"] = markup.to_dict()
                 response = await client.post(
                     f"https://api.telegram.org/bot{token}/editMessageText",
                     json=edit,
@@ -235,6 +265,8 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                 data = response.json()
                 if not data.get("ok") and "message is not modified" not in str(data):
                     raise HTTPException(status_code=502, detail=data)
+                if stored is not None:
+                    stored.message_id = existing
                 return {"id": existing, "chat_id": body.chat_id, "replayed": True}
             payload = {"chat_id": body.chat_id, "text": text}
             if parse_mode:
@@ -248,6 +280,8 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
             message_id = data["result"]["message_id"]
             for row in rows:
                 row.message_id = message_id
+            if stored is not None:
+                stored.message_id = message_id
     return {"id": message_id, "chat_id": body.chat_id}
 
 

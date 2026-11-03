@@ -8,7 +8,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from socrat_bot.models import Action, Audit, Broadcast, LinkCode, SudoRequest, User, utcnow
+from socrat_bot.models import Action, Audit, Broadcast, LinkCode, SudoRequest, TelegramCard, User, utcnow
 
 ACTION_TYPES = {
     "alert.silence",
@@ -59,9 +59,13 @@ def create_action(
     idempotency_key: str,
     message_id: int | None = None,
     ttl_seconds: int | None = None,
+    refresh: bool = False,
 ) -> Action:
     existing = db.scalar(select(Action).where(Action.idempotency_key == idempotency_key))
     if existing:
+        if refresh and existing.status == "pending":
+            existing.payload = payload
+            existing.chat_id = chat_id
         return existing
     expires = utcnow() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
     row = Action(
@@ -74,6 +78,22 @@ def create_action(
     )
     db.add(row)
     db.flush()
+    return row
+
+
+def open_card(db: Session, key: str, chat_id: int, firing: bool) -> TelegramCard:
+    """Return the live card row. A firing alert after resolve starts a new message."""
+    row = db.get(TelegramCard, key)
+    if row is None:
+        row = TelegramCard(key=key, chat_id=chat_id, generation=1, status="firing" if firing else "resolved")
+        db.add(row)
+        db.flush()
+        return row
+    row.chat_id = chat_id
+    if firing and row.status == "resolved":
+        row.generation += 1
+        row.message_id = None
+    row.status = "firing" if firing else "resolved"
     return row
 
 

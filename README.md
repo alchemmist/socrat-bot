@@ -51,6 +51,29 @@ Updater:
 
 Image publish in GitHub Actions uses the secrets `HARBOR_USERNAME`, `HARBOR_PASSWORD`, and `HOMELAB_DEPLOY_KEY`.
 
+## Alert cards
+
+`POST /v1/messages` sends one card. An Alertmanager alert is the `alert` object (`status`, `labels`, `annotations`). The bot keeps one Telegram message per object: alert name plus pod, workload, or node. A cluster alert with no object is keyed by the alert name only. Repeats edit that message. `resolved` updates the same message, adds the word Resolved, and removes the mute buttons. The next firing after that is a new message.
+
+Links come from a provider registry in `socrat_bot.cards`, not from Prometheus annotations. The alert default is Alert, then the node dashboard and Rancher when the subject is a node, Rancher for a pod or an explicitly labeled workload, Loki logs, and Argo CD when the namespace maps to one Application. At most four of those. A trace id adds Traces (Tempo) only when the caller asks for the `traces` provider, or when that provider is included in `card.links`.
+
+A non-alert card uses the same renderer:
+
+```json
+{
+  "chat_id": 1,
+  "card": {
+    "key": "deploy-blog",
+    "title": "blog rolled out",
+    "labels": {"namespace": "blog", "trace_id": "abc"},
+    "links": ["argo", "traces"],
+    "hrefs": [{"label": "Diff", "url": "https://example.invalid/diff"}]
+  }
+}
+```
+
+`links` names providers. Unknown names are rejected. `hrefs` are extra URLs for that message only. Mute buttons are added for a firing alert when `actions` is empty.
+
 ## socrat-sudo
 
 The `socrat-sudo` command sits beside `sudo`. It sends the arguments to the broker and invokes `sudo` with the same arguments only after confirmation. sudoers is not tightened yet: plain `sudo` is still available. The client adds Telegram confirmation and does not replace the privilege policy.
