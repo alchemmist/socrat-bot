@@ -13,6 +13,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from socrat_bot.cards import Card, Link, build_alert, mute_actions, render_card, select_links
 from socrat_bot.db import init_schema, session
+from socrat_bot.grafana_rules import start_rule_refresh
 from socrat_bot.logic import (
     apply_action,
     broadcast_zone,
@@ -35,6 +36,7 @@ from socrat_bot.models import Broadcast
 from socrat_bot.models import Action
 
 ptb: Application | None = None
+_updates: set[asyncio.Task] = set()
 
 
 class Href(BaseModel):
@@ -357,6 +359,7 @@ def _result_text(action: Action, result: dict) -> str:
 async def lifespan(app: FastAPI):
     global ptb
     init_schema()
+    start_rule_refresh()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if token:
         ptb = Application.builder().token(token).updater(None).build()
@@ -386,9 +389,21 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
     if not expected or x_telegram_bot_api_secret_token != expected or ptb is None:
         raise HTTPException(status_code=401, detail="unauthorized")
-    update = Update.de_json(await request.json(), ptb.bot)
-    await ptb.process_update(update)
+    payload = await request.json()
+    task = asyncio.create_task(_run_update(payload))
+    _updates.add(task)
+    task.add_done_callback(_updates.discard)
     return {"ok": True}
+
+
+async def _run_update(payload: dict) -> None:
+    if ptb is None:
+        return
+    try:
+        update = Update.de_json(payload, ptb.bot)
+        await ptb.process_update(update)
+    except Exception as exc:
+        print(f"telegram update {exc}", flush=True)
 
 
 @api.post("/v1/messages")

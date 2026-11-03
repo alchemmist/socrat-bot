@@ -112,17 +112,25 @@ def alert_url(alertname: str) -> str:
 
 
 def rules_by_name() -> dict[str, PromRule]:
-    global _cached_at, _cached
     if os.environ.get("GRAFANA_RULES_DISABLE") == "1":
         return {}
-    now = time.monotonic()
     with _lock:
-        if now - _cached_at < 60:
-            return _cached
-        loaded = _load()
-        _cached = loaded or _cached
-        _cached_at = now
-        return _cached
+        return dict(_cached)
+
+
+def refresh_rules_forever() -> None:
+    while True:
+        if os.environ.get("GRAFANA_RULES_DISABLE") != "1":
+            loaded = _load()
+            if loaded:
+                with _lock:
+                    _cached.clear()
+                    _cached.update(loaded)
+        time.sleep(60)
+
+
+def start_rule_refresh() -> None:
+    threading.Thread(target=refresh_rules_forever, name="grafana-rules", daemon=True).start()
 
 
 def _load() -> dict[str, PromRule]:
