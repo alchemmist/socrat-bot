@@ -1,3 +1,7 @@
+import os
+
+os.environ["GRAFANA_RULES_DISABLE"] = "1"
+
 from socrat_bot.cards import build_alert, render_card, select_links
 
 

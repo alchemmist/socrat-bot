@@ -208,7 +208,9 @@ class AlertLink(LinkProvider):
         name = labels.get("alertname", "")
         if not name:
             return None
-        return Link("Alert", f"{GRAFANA_URL}/alerting/list?search={quote('alertname:' + name, safe='')}")
+        from socrat_bot.grafana_rules import alert_url
+
+        return Link("Alert", alert_url(name))
 
 
 class NodesLink(LinkProvider):
