@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -68,16 +68,32 @@ def mark_vpn(db: Session, telegram_id: int) -> User:
     return user
 
 
-def parse_broadcast_command(text: str) -> tuple[datetime, str] | None:
-    """`YYYY-MM-DD HH:MM message` in BROADCAST_TZ, returned as UTC."""
-    parts = text.strip().split(maxsplit=2)
-    if len(parts) < 3 or not parts[2].strip():
-        return None
-    try:
-        local = datetime.strptime(f"{parts[0]} {parts[1]}", "%Y-%m-%d %H:%M")
-    except ValueError:
-        return None
-    return local.replace(tzinfo=broadcast_zone()).astimezone(timezone.utc), parts[2].strip()
+def begin_mailing(db: Session, chat_id: int, text: str) -> Broadcast:
+    row = Broadcast(text=text, status="choosing", chat_id=chat_id)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def mailing_dates(now: datetime, days: int = 7) -> list[date]:
+    start = now.astimezone(broadcast_zone()).date()
+    return [start + timedelta(days=offset) for offset in range(days)]
+
+
+def mailing_hours(day: date, now: datetime) -> list[int]:
+    """Hours 8 through 22 inclusive. Today skips hours that already started."""
+    local = now.astimezone(broadcast_zone())
+    first = 8
+    if day == local.date():
+        first = max(8, local.hour + 1)
+    if first > 22:
+        return []
+    return list(range(first, 23))
+
+
+def mailing_slot(day: date, hour: int) -> datetime:
+    local = datetime.combine(day, time(hour, 0), tzinfo=broadcast_zone())
+    return local.astimezone(timezone.utc)
 
 
 def schedule_broadcast(db: Session, chat_id: int, send_at: datetime, text: str) -> Broadcast:

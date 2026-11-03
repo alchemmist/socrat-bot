@@ -22,9 +22,12 @@ from socrat_bot.logic import (
     deliver_broadcast,
     ensure_user,
     is_owner,
+    begin_mailing,
+    mailing_dates,
+    mailing_hours,
+    mailing_slot,
     mark_vpn,
     open_card,
-    parse_broadcast_command,
     schedule_broadcast,
     vpn_audience,
 )
@@ -143,32 +146,132 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def on_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _date_keyboard(broadcast_id: uuid.UUID, now: datetime) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current: list[InlineKeyboardButton] = []
+    for day in mailing_dates(now):
+        current.append(
+            InlineKeyboardButton(day.strftime("%d %b"), callback_data=f"m:d:{broadcast_id}:{day.strftime('%Y%m%d')}")
+        )
+        if len(current) == 3:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    rows.append([InlineKeyboardButton("Now", callback_data=f"m:n:{broadcast_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _hour_keyboard(broadcast_id: uuid.UUID, day, hours: list[int]) -> InlineKeyboardMarkup:
+    stamp = day.strftime("%Y%m%d")
+    rows: list[list[InlineKeyboardButton]] = []
+    current: list[InlineKeyboardButton] = []
+    for hour in hours:
+        current.append(
+            InlineKeyboardButton(
+                f"{hour:02d}:00",
+                callback_data=f"m:h:{broadcast_id}:{stamp}:{hour:02d}",
+            )
+        )
+        if len(current) == 5:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    return InlineKeyboardMarkup(rows)
+
+
+async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     user = update.effective_user
     if message is None or user is None:
         return
+    text = " ".join(context.args or []).strip()
     with session() as db:
         if not is_owner(db, user.id):
             await message.reply_text("This command is available to the owner only.")
             return
-        parsed = parse_broadcast_command(" ".join(context.args or []))
-        if parsed is None:
-            await message.reply_text("Usage: /broadcast YYYY-MM-DD HH:MM message\nTime is Europe/Moscow.")
+        if not text:
+            await message.reply_text("Usage: /mailing message text")
             return
-        send_at, text = parsed
-        if send_at <= datetime.now(send_at.tzinfo):
-            await message.reply_text("That time is already in the past.")
-            return
-        schedule_broadcast(db, user.id, send_at, text)
-        count = len(vpn_audience(db))
-    local = send_at.astimezone(broadcast_zone()).strftime("%Y-%m-%d %H:%M")
-    await message.reply_text(f"Scheduled for {local} {broadcast_zone().key}. VPN recipients now: {count}.")
+        row = begin_mailing(db, user.id, text)
+        broadcast_id = row.id
+    await message.reply_text(
+        "Pick a day. Time is Europe/Moscow.",
+        reply_markup=_date_keyboard(broadcast_id, datetime.now(broadcast_zone())),
+    )
+
+
+async def _on_mailing_callback(query, data: str) -> bool:
+    if not data.startswith("m:"):
+        return False
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    parts = data.split(":")
+    if len(parts) < 3:
+        return True
+    kind, raw_id = parts[1], parts[2]
+    try:
+        broadcast_id = uuid.UUID(raw_id)
+    except ValueError:
+        return True
+    notice = None
+    with session() as db:
+        if not is_owner(db, query.from_user.id):
+            notice = "This command is available to the owner only."
+        else:
+            row = db.get(Broadcast, broadcast_id)
+            if row is None or row.status != "choosing":
+                return True
+            now = datetime.now(broadcast_zone())
+            if kind == "d" and len(parts) == 4:
+                day = datetime.strptime(parts[3], "%Y%m%d").date()
+                hours = mailing_hours(day, now)
+                label = day.strftime("%d %b")
+                if not hours:
+                    await query.edit_message_text(
+                        f"{label} has no hours left. Pick another day.",
+                        reply_markup=_date_keyboard(broadcast_id, now),
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"{label}. Pick an hour, Europe/Moscow.",
+                        reply_markup=_hour_keyboard(broadcast_id, day, hours),
+                    )
+                return True
+            if kind == "h" and len(parts) == 5:
+                day = datetime.strptime(parts[3], "%Y%m%d").date()
+                hour = int(parts[4])
+                if hour not in mailing_hours(day, now):
+                    await query.edit_message_text(
+                        "That hour has already passed. Pick another day.",
+                        reply_markup=_date_keyboard(broadcast_id, now),
+                    )
+                    return True
+                send_at = mailing_slot(day, hour)
+                row.send_at = send_at
+                row.status = "scheduled"
+                count = len(vpn_audience(db))
+                local = send_at.astimezone(broadcast_zone()).strftime("%Y-%m-%d %H:%M")
+                notice = f"Scheduled for {local} {broadcast_zone().key}. VPN recipients now: {count}."
+            elif kind == "n":
+                row.status = "sending"
+                result = await deliver_broadcast(db, row)
+                notice = f"Sent now. Delivered {result.get('sent', 0)}, not accepted {result.get('failed', [])}."
+            else:
+                return True
+    if notice:
+        await query.edit_message_text(notice)
+    return True
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
+        return
+    if await _on_mailing_callback(query, query.data):
         return
     if query.data == "vpn:yes":
         try:
@@ -258,7 +361,7 @@ async def lifespan(app: FastAPI):
     if token:
         ptb = Application.builder().token(token).updater(None).build()
         ptb.add_handler(CommandHandler("start", on_start))
-        ptb.add_handler(CommandHandler("broadcast", on_broadcast))
+        ptb.add_handler(CommandHandler("mailing", on_mailing))
         ptb.add_handler(CallbackQueryHandler(on_callback))
         await ptb.initialize()
         await ptb.start()

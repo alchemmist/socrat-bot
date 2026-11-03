@@ -17,7 +17,7 @@ from socrat_bot.logic import (
     ensure_user,
     issue_link_code,
     mark_vpn,
-    parse_broadcast_command,
+    mailing_hours,
     schedule_broadcast,
     vpn_audience,
 )
@@ -119,17 +119,27 @@ def test_mark_vpn_does_not_demote_the_owner():
         assert guest.role == "vpn" and guest.uses_vpn is True
 
 
+def test_mailing_hours_skip_the_past_on_the_same_day():
+    from datetime import date
+
+    from socrat_bot.logic import broadcast_zone
+
+    morning = datetime(2026, 4, 2, 7, 30, tzinfo=broadcast_zone())
+    assert mailing_hours(date(2026, 4, 2), morning)[0] == 8
+    assert mailing_hours(date(2026, 4, 2), morning)[-1] == 22
+    afternoon = datetime(2026, 4, 2, 15, 10, tzinfo=broadcast_zone())
+    assert mailing_hours(date(2026, 4, 2), afternoon) == list(range(16, 23))
+    assert mailing_hours(date(2026, 4, 3), afternoon) == list(range(8, 23))
+    late = datetime(2026, 4, 2, 22, 5, tzinfo=broadcast_zone())
+    assert mailing_hours(date(2026, 4, 2), late) == []
+
+
 def test_scheduled_broadcast_is_claimed_when_due():
-    parsed = parse_broadcast_command("2026-04-02 09:00 Maintenance tonight")
-    assert parsed is not None
-    send_at, text = parsed
-    assert text == "Maintenance tonight"
-    assert send_at.tzinfo is not None
+    send_at = datetime(2026, 4, 2, 6, tzinfo=timezone.utc)
     with session() as db:
-        row = schedule_broadcast(db, 10, send_at, text)
+        row = schedule_broadcast(db, 10, send_at, "Maintenance tonight")
         early = claim_due_broadcasts(db, now=datetime(2026, 4, 1, tzinfo=timezone.utc))
         assert early == []
         due = claim_due_broadcasts(db, now=datetime(2026, 4, 2, 12, tzinfo=timezone.utc))
         assert [item.id for item in due] == [row.id]
         assert row.status == "sending"
-    assert parse_broadcast_command("tomorrow hello") is None
