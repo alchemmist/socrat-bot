@@ -1,4 +1,5 @@
 import os
+from urllib.parse import unquote
 
 os.environ["GRAFANA_RULES_DISABLE"] = "1"
 
@@ -94,7 +95,8 @@ def test_workload_alert_ignores_the_metrics_pod():
     logs = next(link for link in card.links if link.label == "Logs")
     assert rancher.url.endswith("/apps.deployment/lms/lms#pods")
     assert "kube-state-metrics" not in rancher.url
-    assert "k8s_namespace_name" in logs.url and "k8s_pod_name" in logs.url
+    query = unquote(logs.url)
+    assert '{k8s_namespace_name=\\"lms\\"} | k8s_pod_name=~\\"lms-.+\\"' in query
     assert "kube-state-metrics" not in logs.url
 
 

@@ -298,10 +298,11 @@ class LogsLink(LinkProvider):
         kind, name = subject(labels)
         if not namespace or not name:
             return None
+        # k8s_pod_name is Loki structured metadata, not an indexed stream label.
         if kind == "pod":
-            expr = '{k8s_namespace_name="%s", k8s_pod_name="%s"}' % (_logql(namespace), _logql(name))
+            expr = '{k8s_namespace_name="%s"} | k8s_pod_name="%s"' % (_logql(namespace), _logql(name))
         else:
-            expr = '{k8s_namespace_name="%s", k8s_pod_name=~"%s-.+"}' % (_logql(namespace), _logql(name))
+            expr = '{k8s_namespace_name="%s"} | k8s_pod_name=~"%s-.+"' % (_logql(namespace), _logql(name))
         return Link("Logs", _loki_explore(expr))
 
 
