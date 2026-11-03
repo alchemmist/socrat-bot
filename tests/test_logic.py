@@ -15,6 +15,7 @@ from socrat_bot.logic import (
     consume_link,
     create_action,
     ensure_user,
+    format_vpn_clients,
     issue_link_code,
     mark_vpn,
     mailing_hours,
@@ -106,8 +107,11 @@ def test_vpn_audience_is_the_opt_in_list():
         db.add(User(telegram_id=2, role="vpn", panel_client_id=None, uses_vpn=False, alerts_enabled=False))
         db.add(User(telegram_id=3, role="owner", panel_client_id="panel-b", uses_vpn=True, alerts_enabled=True))
         db.flush()
-        audience = {user.telegram_id for user in vpn_audience(db)}
+        people = vpn_audience(db)
+        audience = {user.telegram_id for user in people}
+        listing = format_vpn_clients(people)
     assert audience == {1, 3}
+    assert listing == "VPN clients: 2\n\u2022 1\n\u2022 3"
 
 
 def test_mark_vpn_does_not_demote_the_owner():

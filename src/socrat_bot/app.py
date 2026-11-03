@@ -22,6 +22,7 @@ from socrat_bot.logic import (
     create_action,
     deliver_broadcast,
     ensure_user,
+    format_vpn_clients,
     is_owner,
     begin_mailing,
     mailing_dates,
@@ -180,6 +181,19 @@ def _hour_keyboard(broadcast_id: uuid.UUID, day, hours: list[int]) -> InlineKeyb
     if current:
         rows.append(current)
     return InlineKeyboardMarkup(rows)
+
+
+async def on_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    with session() as db:
+        if not is_owner(db, user.id):
+            text = "This command is available to the owner only."
+        else:
+            text = format_vpn_clients(vpn_audience(db))
+    await message.reply_text(text)
 
 
 async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -414,6 +428,7 @@ async def lifespan(app: FastAPI):
     if token:
         ptb = Application.builder().token(token).updater(None).build()
         ptb.add_handler(CommandHandler("start", on_start))
+        ptb.add_handler(CommandHandler("clients", on_clients))
         ptb.add_handler(CommandHandler("mailing", on_mailing))
         ptb.add_handler(CallbackQueryHandler(on_callback))
         await ptb.initialize()

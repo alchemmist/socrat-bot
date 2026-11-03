@@ -212,6 +212,15 @@ def vpn_audience(db: Session) -> list[User]:
     return list(db.scalars(select(User).where(User.uses_vpn.is_(True))))
 
 
+def format_vpn_clients(users: list[User]) -> str:
+    ordered = sorted(users, key=lambda user: user.telegram_id)
+    if not ordered:
+        return "VPN clients: 0"
+    lines = [f"VPN clients: {len(ordered)}"]
+    lines.extend(f"\u2022 {user.telegram_id}" for user in ordered)
+    return "\n".join(lines)
+
+
 async def apply_action(db: Session, action: Action, actor: str) -> dict:
     if action.status != "pending":
         stored = dict(action.result or {})
