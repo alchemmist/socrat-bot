@@ -22,6 +22,7 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    username: Mapped[str | None] = mapped_column(String(32), nullable=True)
     role: Mapped[str] = mapped_column(String(32))
     panel_client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     uses_vpn: Mapped[bool] = mapped_column(default=False)

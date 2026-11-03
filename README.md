@@ -78,7 +78,7 @@ A non-alert card uses the same renderer:
 
 `/start` stores the Telegram user. The reply is `Socrat is online.` with one button, `I use VPN`. Pressing it sets `uses_vpn` and does not change an owner into a regular user. A normal user becomes role `vpn`. The broadcast audience is everyone with `uses_vpn`, including an owner who opted in. A panel link code is separate and does not by itself add the person to this list.
 
-The owner lists those Telegram accounts with `/clients`. Someone who only pressed `/start` is not included.
+The owner lists those Telegram accounts with `/clients`. Each known username is shown as `@username`. Someone who only pressed `/start` is not included.
 
 The owner starts a mailing with the text:
 

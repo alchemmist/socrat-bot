@@ -30,7 +30,7 @@ def broadcast_zone() -> ZoneInfo:
     return ZoneInfo(os.environ.get("BROADCAST_TZ", "Europe/Moscow"))
 
 
-def ensure_user(db: Session, telegram_id: int) -> User:
+def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> User:
     user = db.scalar(select(User).where(User.telegram_id == telegram_id))
     configured = owner_ids()
     has_owner = db.scalar(select(User.id).where(User.role == "owner")) is not None
@@ -46,6 +46,8 @@ def ensure_user(db: Session, telegram_id: int) -> User:
     elif promote:
         user.role = "owner"
         user.alerts_enabled = True
+    if username is not None:
+        user.username = username.lstrip("@") or None
     db.flush()
     return user
 
@@ -59,8 +61,8 @@ def is_owner(db: Session, telegram_id: int) -> bool:
     return ensure_owner(db, telegram_id) is not None
 
 
-def mark_vpn(db: Session, telegram_id: int) -> User:
-    user = ensure_user(db, telegram_id)
+def mark_vpn(db: Session, telegram_id: int, username: str | None = None) -> User:
+    user = ensure_user(db, telegram_id, username)
     user.uses_vpn = True
     if user.role == "user":
         user.role = "vpn"
@@ -217,7 +219,9 @@ def format_vpn_clients(users: list[User]) -> str:
     if not ordered:
         return "VPN clients: 0"
     lines = [f"VPN clients: {len(ordered)}"]
-    lines.extend(f"\u2022 {user.telegram_id}" for user in ordered)
+    lines.extend(
+        f"\u2022 @{user.username}" if user.username else f"\u2022 {user.telegram_id}" for user in ordered
+    )
     return "\n".join(lines)
 
 

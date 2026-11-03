@@ -33,7 +33,7 @@ from socrat_bot.logic import (
     schedule_broadcast,
     vpn_audience,
 )
-from socrat_bot.models import Action, Broadcast, TelegramCard
+from socrat_bot.models import Action, Broadcast, TelegramCard, User
 
 ptb: Application | None = None
 _updates: set[asyncio.Task] = set()
@@ -128,7 +128,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     arg = context.args[0] if context.args else ""
     already = False
     with session() as db:
-        person = ensure_user(db, user.id)
+        person = ensure_user(db, user.id, user.username)
         already = bool(person.uses_vpn)
         print(f"telegram_start id={user.id} role={person.role}", flush=True)
         if arg.startswith("link_"):
@@ -183,17 +183,46 @@ def _hour_keyboard(broadcast_id: uuid.UUID, day, hours: list[int]) -> InlineKeyb
     return InlineKeyboardMarkup(rows)
 
 
+async def _remember_usernames(telegram_ids: list[int]) -> None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token or not telegram_ids:
+        return
+    found: list[tuple[int, str]] = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        for telegram_id in telegram_ids:
+            response = await client.get(
+                f"https://api.telegram.org/bot{token}/getChat",
+                params={"chat_id": telegram_id},
+            )
+            username = (response.json().get("result") or {}).get("username")
+            if username:
+                found.append((telegram_id, username))
+    if not found:
+        return
+    with session() as db:
+        for telegram_id, username in found:
+            person = db.scalar(select(User).where(User.telegram_id == telegram_id))
+            if person is not None:
+                person.username = username
+
+
 async def on_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     user = update.effective_user
     if message is None or user is None:
         return
     with session() as db:
-        if not is_owner(db, user.id):
-            text = "This command is available to the owner only."
-        else:
-            text = format_vpn_clients(vpn_audience(db))
-    await message.reply_text(text)
+        owner = is_owner(db, user.id)
+        people = vpn_audience(db) if owner else []
+        missing = [person.telegram_id for person in people if not person.username]
+    if not owner:
+        await message.reply_text("This command is available to the owner only.")
+        return
+    if missing:
+        await _remember_usernames(missing)
+        with session() as db:
+            people = vpn_audience(db)
+    await message.reply_text(format_vpn_clients(people))
 
 
 async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -305,7 +334,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         with session() as db:
-            mark_vpn(db, query.from_user.id)
+            mark_vpn(db, query.from_user.id, query.from_user.username)
         try:
             await query.edit_message_text("Socrat is online.\nYou are on the VPN list.")
         except Exception:

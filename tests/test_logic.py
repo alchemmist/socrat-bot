@@ -114,6 +114,16 @@ def test_vpn_audience_is_the_opt_in_list():
     assert listing == "VPN clients: 2\n\u2022 1\n\u2022 3"
 
 
+def test_vpn_client_list_prefers_username():
+    shown = format_vpn_clients(
+        [
+            User(telegram_id=3, role="vpn", uses_vpn=True, alerts_enabled=False, username="ada"),
+            User(telegram_id=1, role="vpn", uses_vpn=True, alerts_enabled=False),
+        ]
+    )
+    assert shown == "VPN clients: 2\n\u2022 1\n\u2022 @ada"
+
+
 def test_mark_vpn_does_not_demote_the_owner():
     with session() as db:
         ensure_user(db, 891074228)
