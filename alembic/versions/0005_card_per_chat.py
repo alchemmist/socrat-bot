@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("message_id", sa.BigInteger(), nullable=True),
         sa.Column("generation", sa.Integer(), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
-        sa.PrimaryKeyConstraint("key", "chat_id", name="telegram_cards_pkey"),
+        sa.PrimaryKeyConstraint("key", "chat_id", name="telegram_cards_next_pkey"),
     )
     op.execute(
         "INSERT INTO telegram_cards_next (key, chat_id, message_id, generation, status) "
