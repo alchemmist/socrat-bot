@@ -1,0 +1,390 @@
+openapi: 3.0.3
+info:
+  title: Socrat Bot
+  version: 1.0.0
+  description: |
+    Внутренний API бота Socrat. Через него другие процессы кластера
+    отправляют карточки алертов, дописывают ссылки и ставят служебные задачи.
+    Публично доступен только webhook Telegram.
+servers:
+  - url: http://socrat-bot.socrat-bot.svc:8080
+    description: Внутренний адрес бота в кластере
+  - url: https://bot.socrat.alchemmist.xyz
+    description: Публичный ingress, только /telegram/webhook
+security:
+  - internalToken: []
+tags:
+  - name: alerts
+    description: Карточки алертов и ссылки на них
+  - name: messages
+    description: Обычные сообщения Telegram
+  - name: vpn
+    description: Привязка клиента панели
+  - name: telegram
+    description: Вход от Telegram
+  - name: health
+    description: Проверка процесса
+paths:
+  /v1/messages:
+    post:
+      tags: [alerts, messages]
+      operationId: postMessage
+      summary: Отправить сообщение или карточку алерта
+      description: |
+        Этот метод вызывает workflow алертов. Один запрос — один алерт.
+        Бот сам строит карточку и отправляет её копию каждому, у кого включены алерты.
+        Поле chat_id в этом случае не выбирает получателей.
+        Повтор того же алерта правит уже отправленную карточку. Resolved дописывается
+        в ту же строку, что и название. Следующее срабатывание после закрытия создаёт новое сообщение.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Message"
+            examples:
+              alert:
+                summary: Один алерт из Alertmanager
+                value:
+                  chat_id: 891074228
+                  alert:
+                    status: firing
+                    labels:
+                      alertname: TargetDown
+                      namespace: cattle-monitoring-system
+                      job: kube-etcd
+                    annotations:
+                      summary: One or more targets are unreachable.
+      responses:
+        "200":
+          description: Сообщение отправлено или обновлено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SentMessage"
+        "400":
+          description: В запросе больше одного алерта или нет текста
+        "401":
+          description: Нет или неверный X-Internal-Token
+  /v1/cards/links:
+    post:
+      tags: [alerts]
+      operationId: addCardLink
+      summary: Дописать ссылку SPI к уже отправленной карточке
+      description: |
+        Для workflow, который разбирает алерт позже и заводит GitHub issue.
+        Бот находит все копии карточки и добавляет ссылку в строку ссылок, не убирая кнопки Mute.
+        Повторный вызов с тем же URL ничего не дублирует. Следующее обновление алерта сохраняет ссылку.
+        Если карточка ещё не отправлялась после появления этого метода, ответ 409:
+        нужно дождаться следующего обновления этого алерта.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CardLink"
+      responses:
+        "200":
+          description: Ссылка записана и проставлена в те копии, где это удалось
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardLinkResult"
+        "400":
+          description: Не переданы ни key, ни alert
+        "401":
+          description: Нет или неверный X-Internal-Token
+        "404":
+          description: Карточка с таким ключом ещё не отправлялась
+        "409":
+          description: У карточки ещё не сохранён текст, повторите после следующего обновления алерта
+  /v1/messages/{message_id}:
+    patch:
+      tags: [messages]
+      operationId: patchMessage
+      summary: Заменить текст одного сообщения
+      parameters:
+        - $ref: "#/components/parameters/messageId"
+        - name: chat_id
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+      responses:
+        "200":
+          description: Сообщение изменено
+        "401":
+          description: Нет или неверный X-Internal-Token
+  /v1/link-codes:
+    post:
+      tags: [vpn]
+      operationId: createLinkCode
+      summary: Выдать одноразовый код привязки клиента панели
+      description: Код не добавляет человека в список VPN сам по себе. Список рассылки — это те, кто нажал «I use VPN».
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [panel_client_id]
+              properties:
+                panel_client_id:
+                  type: string
+                ttl_seconds:
+                  type: integer
+                  default: 900
+      responses:
+        "200":
+          description: Код и команда /start, которой его нужно передать
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                  start:
+                    type: string
+                    example: link_ab12
+        "401":
+          description: Нет или неверный X-Internal-Token
+  /v1/broadcasts:
+    post:
+      tags: [messages]
+      operationId: createBroadcast
+      summary: Создать черновик рассылки
+      description: Обычная рассылка запускается командой /mailing в Telegram, не этим методом.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, chat_id]
+              properties:
+                text:
+                  type: string
+                chat_id:
+                  type: integer
+                  format: int64
+      responses:
+        "200":
+          description: Черновик создан и показан владельцу
+        "401":
+          description: Нет или неверный X-Internal-Token
+  /v1/actions/{action_id}:
+    get:
+      tags: [messages]
+      operationId: getAction
+      summary: Статус кнопки в сообщении
+      parameters:
+        - name: action_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Текущий статус действия
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+                  result:
+                    type: object
+        "401":
+          description: Нет или неверный X-Internal-Token
+        "404":
+          description: Действие не найдено
+  /telegram/webhook:
+    post:
+      tags: [telegram]
+      operationId: telegramWebhook
+      summary: Принять обновление Telegram
+      description: Единственный публичный метод. Его вызывает Telegram, не внутренние workflow.
+      security:
+        - telegramSecret: []
+      servers:
+        - url: https://bot.socrat.alchemmist.xyz
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Update из Bot API
+      responses:
+        "200":
+          description: Обновление принято
+        "401":
+          description: Секрет webhook не совпал
+  /healthz:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Процесс жив
+      security: []
+      responses:
+        "200":
+          description: Процесс отвечает
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+components:
+  securitySchemes:
+    internalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+    telegramSecret:
+      type: apiKey
+      in: header
+      name: X-Telegram-Bot-Api-Secret-Token
+  parameters:
+    messageId:
+      name: message_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+  schemas:
+    Message:
+      type: object
+      required: [chat_id]
+      properties:
+        chat_id:
+          type: integer
+          format: int64
+          description: Чат для обычного сообщения. Для алерта получатели берутся из подписки.
+        text:
+          type: string
+        alert:
+          $ref: "#/components/schemas/Alert"
+        alerts:
+          type: array
+          maxItems: 1
+          items:
+            $ref: "#/components/schemas/Alert"
+        card:
+          $ref: "#/components/schemas/Card"
+        actions:
+          type: array
+          items:
+            type: object
+        parse_mode:
+          type: string
+          enum: [HTML]
+    Alert:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [firing, resolved]
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+        fingerprint:
+          type: string
+    Card:
+      type: object
+      required: [key, title]
+      properties:
+        key:
+          type: string
+        title:
+          type: string
+        where:
+          type: string
+        summary:
+          type: string
+        status:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        links:
+          type: array
+          items:
+            type: string
+          description: Имена провайдеров ссылок, например alert, rancher, logs.
+        hrefs:
+          type: array
+          items:
+            type: object
+            required: [label, url]
+            properties:
+              label:
+                type: string
+              url:
+                type: string
+    CardLink:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+        label:
+          type: string
+          default: SPI
+        key:
+          type: string
+          description: Ключ карточки, если он уже известен.
+        alert:
+          $ref: "#/components/schemas/Alert"
+    CardLinkResult:
+      type: object
+      properties:
+        key:
+          type: string
+        updated:
+          type: array
+          items:
+            type: object
+            properties:
+              chat_id:
+                type: integer
+                format: int64
+              message_id:
+                type: integer
+                format: int64
+    SentMessage:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        chat_id:
+          type: integer
+          format: int64
+        replayed:
+          type: boolean
