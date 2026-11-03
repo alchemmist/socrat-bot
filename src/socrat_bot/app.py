@@ -261,7 +261,7 @@ async def _on_mailing_callback(query, data: str) -> bool:
             elif kind == "n":
                 row.status = "sending"
                 result = await deliver_broadcast(db, row)
-                notice = f"Sent now. Delivered {result.get('sent', 0)}, not accepted {result.get('failed', [])}."
+                notice = _delivery_notice("Sent now", result)
             else:
                 return True
     if notice:
@@ -347,12 +347,22 @@ def _result_text(action: Action, result: dict) -> str:
             return "Automation restored the working version. Further checks have to be done manually."
         return f"Upgrade: {result}"
     if action.type == "broadcast.send":
-        return f"Broadcast: sent {result.get('sent', 0)}, not accepted {result.get('failed', [])}"
+        return _delivery_notice("Broadcast", result)
     if action.type == "broadcast.cancel":
         return "Broadcast cancelled."
     if action.type in {"sudo.approve", "sudo.deny"}:
         return f"Sudo {result.get('status')}: {result.get('argv')}"
     return str(result)
+
+
+def _delivery_notice(title: str, result: dict) -> str:
+    sent = result.get("sent", 0)
+    failed = result.get("failed") or []
+    text = f"{title}. Delivered {sent}."
+    if not failed:
+        return text
+    lines = "\n".join(f"\u2022 {item}" for item in failed)
+    return f"{text}\nNot accepted:\n{lines}"
 
 
 @asynccontextmanager
