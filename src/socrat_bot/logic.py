@@ -275,9 +275,7 @@ async def _silence(payload: dict) -> dict:
         return {"status": "silenced", "silence": response.json()}
 
 
-async def deliver_broadcast(db: Session, row: Broadcast | None) -> dict:
-    if row is None or row.status not in {"draft", "preview", "scheduled", "sending"}:
-        return {"status": "skipped", "reason": row.status if row else "missing"}
+async def deliver_broadcast(text: str, recipients: list[int]) -> dict:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     pause = float(os.environ.get("BROADCAST_PAUSE_SECONDS", "0.4"))
     sent = 0
@@ -285,19 +283,16 @@ async def deliver_broadcast(db: Session, row: Broadcast | None) -> dict:
     import asyncio
 
     async with httpx.AsyncClient(timeout=20) as client:
-        for user in vpn_audience(db):
+        for telegram_id in recipients:
             response = await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": user.telegram_id, "text": row.text},
+                json={"chat_id": telegram_id, "text": text},
             )
             if response.status_code == 200 and response.json().get("ok"):
                 sent += 1
             else:
-                failed.append(user.telegram_id)
+                failed.append(telegram_id)
             await asyncio.sleep(pause)
-    row.status = "sent"
-    row.sent = sent
-    row.failed = failed
     return {"status": "sent", "sent": sent, "failed": failed}
 
 
