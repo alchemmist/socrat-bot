@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -25,25 +26,79 @@ def owner_ids() -> set[int]:
     return {int(raw)} if raw else set()
 
 
-def ensure_owner(db: Session, telegram_id: int) -> User | None:
+def broadcast_zone() -> ZoneInfo:
+    return ZoneInfo(os.environ.get("BROADCAST_TZ", "Europe/Moscow"))
+
+
+def ensure_user(db: Session, telegram_id: int) -> User:
     user = db.scalar(select(User).where(User.telegram_id == telegram_id))
     configured = owner_ids()
     has_owner = db.scalar(select(User.id).where(User.role == "owner")) is not None
     promote = telegram_id in configured or (not configured and not has_owner)
-    if user is None and (promote or telegram_id in configured):
-        user = User(telegram_id=telegram_id, role="owner" if promote else "vpn", alerts_enabled=promote)
+    if user is None:
+        user = User(
+            telegram_id=telegram_id,
+            role="owner" if promote else "user",
+            uses_vpn=False,
+            alerts_enabled=promote,
+        )
         db.add(user)
-    elif user is not None and promote:
+    elif promote:
         user.role = "owner"
         user.alerts_enabled = True
-    if user is not None:
-        db.flush()
+    db.flush()
     return user
 
 
+def ensure_owner(db: Session, telegram_id: int) -> User | None:
+    user = ensure_user(db, telegram_id)
+    return user if user.role == "owner" else None
+
+
 def is_owner(db: Session, telegram_id: int) -> bool:
-    user = ensure_owner(db, telegram_id)
-    return user is not None and user.role == "owner"
+    return ensure_owner(db, telegram_id) is not None
+
+
+def mark_vpn(db: Session, telegram_id: int) -> User:
+    user = ensure_user(db, telegram_id)
+    user.uses_vpn = True
+    if user.role == "user":
+        user.role = "vpn"
+    audit(db, str(telegram_id), "vpn.opt_in", {"role": user.role})
+    return user
+
+
+def parse_broadcast_command(text: str) -> tuple[datetime, str] | None:
+    """`YYYY-MM-DD HH:MM message` in BROADCAST_TZ, returned as UTC."""
+    parts = text.strip().split(maxsplit=2)
+    if len(parts) < 3 or not parts[2].strip():
+        return None
+    try:
+        local = datetime.strptime(f"{parts[0]} {parts[1]}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    return local.replace(tzinfo=broadcast_zone()).astimezone(timezone.utc), parts[2].strip()
+
+
+def schedule_broadcast(db: Session, chat_id: int, send_at: datetime, text: str) -> Broadcast:
+    row = Broadcast(text=text, status="scheduled", chat_id=chat_id, send_at=send_at)
+    db.add(row)
+    db.flush()
+    audit(db, str(chat_id), "broadcast.schedule", {"id": str(row.id), "send_at": send_at.isoformat()})
+    return row
+
+
+def claim_due_broadcasts(db: Session, now: datetime | None = None) -> list[Broadcast]:
+    moment = now or datetime.now(timezone.utc)
+    rows = list(
+        db.scalars(
+            select(Broadcast).where(Broadcast.status == "scheduled", Broadcast.send_at.is_not(None), Broadcast.send_at <= moment)
+        )
+    )
+    for row in rows:
+        row.status = "sending"
+    db.flush()
+    return rows
 
 
 def audit(db: Session, actor: str, event: str, detail: dict) -> None:
@@ -138,11 +193,7 @@ def consume_link(db: Session, telegram_id: int, code: str) -> str:
 
 
 def vpn_audience(db: Session) -> list[User]:
-    return list(
-        db.scalars(
-            select(User).where(User.role == "vpn", User.panel_client_id.is_not(None))
-        )
-    )
+    return list(db.scalars(select(User).where(User.uses_vpn.is_(True))))
 
 
 async def apply_action(db: Session, action: Action, actor: str) -> dict:
@@ -174,7 +225,8 @@ async def _dispatch(db: Session, action: Action) -> dict:
     if action.type == "alert.silence":
         return await _silence(action.payload)
     if action.type == "broadcast.send":
-        return await _broadcast(db, action)
+        row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
+        return await deliver_broadcast(db, row)
     if action.type == "broadcast.cancel":
         row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
         if row:
@@ -207,10 +259,9 @@ async def _silence(payload: dict) -> dict:
         return {"status": "silenced", "silence": response.json()}
 
 
-async def _broadcast(db: Session, action: Action) -> dict:
-    row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
-    if row is None or row.status not in {"draft", "preview"}:
-        return {"status": "skipped", "reason": "not a draft"}
+async def deliver_broadcast(db: Session, row: Broadcast | None) -> dict:
+    if row is None or row.status not in {"draft", "preview", "scheduled", "sending"}:
+        return {"status": "skipped", "reason": row.status if row else "missing"}
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     pause = float(os.environ.get("BROADCAST_PAUSE_SECONDS", "0.4"))
     sent = 0

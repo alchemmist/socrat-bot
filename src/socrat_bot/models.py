@@ -24,6 +24,7 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     role: Mapped[str] = mapped_column(String(32))
     panel_client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    uses_vpn: Mapped[bool] = mapped_column(default=False)
     alerts_enabled: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -69,6 +70,7 @@ class Broadcast(Base):
     failed: Mapped[dict] = mapped_column(JSONType, default=list)
     chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TelegramCard(Base):

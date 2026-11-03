@@ -1,6 +1,8 @@
+import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -11,8 +13,23 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from socrat_bot.cards import Card, Link, build_alert, mute_actions, render_card, select_links
 from socrat_bot.db import init_schema, session
-from socrat_bot.logic import apply_action, consume_link, create_action, ensure_owner, is_owner, open_card
-from socrat_bot.models import Action, Broadcast
+from socrat_bot.logic import (
+    apply_action,
+    broadcast_zone,
+    claim_due_broadcasts,
+    consume_link,
+    create_action,
+    deliver_broadcast,
+    ensure_user,
+    is_owner,
+    mark_vpn,
+    open_card,
+    parse_broadcast_command,
+    schedule_broadcast,
+    vpn_audience,
+)
+from socrat_bot.models import Broadcast
+from socrat_bot.models import Action
 
 ptb: Application | None = None
 
@@ -104,20 +121,68 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None or update.message is None:
         return
     arg = context.args[0] if context.args else ""
+    already = False
     with session() as db:
-        ensure_owner(db, user.id)
-        print(f"telegram_start id={user.id}", flush=True)
+        person = ensure_user(db, user.id)
+        already = bool(person.uses_vpn)
+        print(f"telegram_start id={user.id} role={person.role}", flush=True)
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
         else:
             text = "Socrat is online."
-    await update.message.reply_text(text)
+    if arg.startswith("link_"):
+        await update.message.reply_text(text)
+        return
+    if already:
+        await update.message.reply_text("Socrat is online.\nYou are on the VPN list.")
+        return
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("I use VPN", callback_data="vpn:yes")]]),
+    )
+
+
+async def on_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    with session() as db:
+        if not is_owner(db, user.id):
+            await message.reply_text("This command is available to the owner only.")
+            return
+        parsed = parse_broadcast_command(" ".join(context.args or []))
+        if parsed is None:
+            await message.reply_text("Usage: /broadcast YYYY-MM-DD HH:MM message\nTime is Europe/Moscow.")
+            return
+        send_at, text = parsed
+        if send_at <= datetime.now(send_at.tzinfo):
+            await message.reply_text("That time is already in the past.")
+            return
+        schedule_broadcast(db, user.id, send_at, text)
+        count = len(vpn_audience(db))
+    local = send_at.astimezone(broadcast_zone()).strftime("%Y-%m-%d %H:%M")
+    await message.reply_text(f"Scheduled for {local} {broadcast_zone().key}. VPN recipients now: {count}.")
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query is None or query.data is None or not query.data.startswith("act:"):
+    if query is None or query.data is None:
+        return
+    if query.data == "vpn:yes":
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        with session() as db:
+            mark_vpn(db, query.from_user.id)
+        try:
+            await query.edit_message_text("Socrat is online.\nYou are on the VPN list.")
+        except Exception:
+            pass
+        return
+    if not query.data.startswith("act:"):
         return
     try:
         await query.answer()
@@ -144,6 +209,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             except Exception:
                 pass
+
+
+async def _broadcast_loop() -> None:
+    while True:
+        await asyncio.sleep(15)
+        try:
+            with session() as db:
+                due = [row.id for row in claim_due_broadcasts(db)]
+            for broadcast_id in due:
+                with session() as db:
+                    row = db.get(Broadcast, broadcast_id)
+                    result = await deliver_broadcast(db, row)
+                    print(f"broadcast {broadcast_id} {result.get('status')}", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"broadcast loop {exc}", flush=True)
 
 
 def _result_text(action: Action, result: dict) -> str:
@@ -176,10 +258,13 @@ async def lifespan(app: FastAPI):
     if token:
         ptb = Application.builder().token(token).updater(None).build()
         ptb.add_handler(CommandHandler("start", on_start))
+        ptb.add_handler(CommandHandler("broadcast", on_broadcast))
         ptb.add_handler(CallbackQueryHandler(on_callback))
         await ptb.initialize()
         await ptb.start()
+    ticker = asyncio.create_task(_broadcast_loop())
     yield
+    ticker.cancel()
     if ptb is not None:
         await ptb.stop()
         await ptb.shutdown()

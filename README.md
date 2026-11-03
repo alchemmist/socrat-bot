@@ -74,6 +74,18 @@ A non-alert card uses the same renderer:
 
 `links` names providers. Unknown names are rejected. `hrefs` are extra URLs for that message only. Mute buttons are added for a firing alert when `actions` is empty.
 
+## VPN list and scheduled broadcast
+
+`/start` stores the Telegram user. The reply is `Socrat is online.` with one button, `I use VPN`. Pressing it sets `uses_vpn` and does not change an owner into a regular user. A normal user becomes role `vpn`. The broadcast audience is everyone with `uses_vpn`, including an owner who opted in. A panel link code is separate and does not by itself add the person to this list.
+
+The owner schedules a message in `Europe/Moscow`:
+
+```
+/broadcast 2026-04-02 09:00 Maintenance tonight
+```
+
+The bot sends it to the VPN list when that time arrives. The check runs about every 15 seconds. `BROADCAST_TZ` overrides the zone.
+
 ## socrat-sudo
 
 The `socrat-sudo` command sits beside `sudo`. It sends the arguments to the broker and invokes `sudo` with the same arguments only after confirmation. sudoers is not tightened yet: plain `sudo` is still available. The client adds Telegram confirmation and does not replace the privilege policy.
