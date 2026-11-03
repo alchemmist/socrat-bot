@@ -133,15 +133,37 @@ def node_name(labels: dict[str, str]) -> str:
 
 
 def workload(labels: dict[str, str]) -> tuple[str, str]:
+    job_name = labels.get("job_name", "")
+    if job_name:
+        return "job", job_name
     for kind in ("deployment", "statefulset", "daemonset"):
         name = labels.get(kind, "")
         if name:
             return kind, name
     kind = labels.get("created_by_kind", "").lower()
     name = labels.get("created_by_name", "")
-    if kind in {"deployment", "statefulset", "daemonset"} and name:
+    if kind in {"job", "deployment", "statefulset", "daemonset"} and name:
         return kind, name
     return "", ""
+
+
+def _exporter_pod(labels: dict[str, str]) -> bool:
+    """kube-state-metrics stamps its own pod onto the series it exposes."""
+    pod = labels.get("pod", "")
+    if "kube-state-metrics" in pod or labels.get("container") == "kube-state-metrics":
+        return True
+    return bool(labels.get("prometheus_replica") and pod.startswith("prometheus-"))
+
+
+def subject(labels: dict[str, str]) -> tuple[str, str]:
+    """What the card is about: a workload, or a pod when that pod is the object."""
+    kind, work = workload(labels)
+    pod = "" if _exporter_pod(labels) else labels.get("pod", "")
+    if kind and (not pod or not pod.startswith(work + "-")):
+        return kind, work
+    if pod:
+        return "pod", pod
+    return kind, work
 
 
 def argo_app(labels: dict[str, str]) -> str:
@@ -158,14 +180,11 @@ def argo_app(labels: dict[str, str]) -> str:
 
 def card_key(alertname: str, labels: dict[str, str]) -> str:
     namespace = labels.get("namespace", "")
-    pod = labels.get("pod", "")
-    kind, work = workload(labels)
+    kind, name = subject(labels)
     node = node_name(labels)
-    if pod and namespace:
-        ident = f"pod/{namespace}/{pod}"
-    elif work and namespace:
-        ident = f"{kind}/{namespace}/{work}"
-    elif node and not pod:
+    if kind and name and namespace:
+        ident = f"{kind}/{namespace}/{name}"
+    elif node and kind != "pod":
         ident = f"node/{node}"
     else:
         ident = "cluster"
@@ -179,14 +198,14 @@ def card_key(alertname: str, labels: dict[str, str]) -> str:
 def object_matchers(alertname: str, labels: dict[str, str]) -> list[dict]:
     pairs = [("alertname", alertname)]
     namespace = labels.get("namespace", "")
-    pod = labels.get("pod", "")
-    kind, work = workload(labels)
+    kind, name = subject(labels)
     node = node_name(labels)
-    if pod and namespace:
-        pairs.extend((("namespace", namespace), ("pod", pod)))
-    elif work and namespace:
-        pairs.extend((("namespace", namespace), (kind, work)))
-    elif node and not pod:
+    if kind == "pod" and namespace:
+        pairs.extend((("namespace", namespace), ("pod", name)))
+    elif kind and name and namespace:
+        label = "job_name" if kind == "job" else kind
+        pairs.extend((("namespace", namespace), (label, name)))
+    elif node:
         pairs.append(("node", node))
     return [{"name": name, "value": value, "isRegex": False, "isEqual": True} for name, value in pairs]
 
@@ -233,17 +252,42 @@ class RancherLink(LinkProvider):
     def match(self, labels: dict[str, str]) -> Link | None:
         base = f"{RANCHER_URL}/dashboard/c/local/explorer"
         namespace = labels.get("namespace", "")
-        pod = labels.get("pod", "")
-        if pod and namespace:
-            return Link("Rancher", f"{base}/pod/{quote(namespace, safe='')}/{quote(pod, safe='')}")
-        kind, work = workload(labels)
-        if kind and work and namespace:
-            rancher_kind = {"deployment": "apps.deployment", "statefulset": "apps.statefulset", "daemonset": "apps.daemonset"}[kind]
-            return Link("Rancher", f"{base}/{rancher_kind}/{quote(namespace, safe='')}/{quote(work, safe='')}")
+        kind, name = subject(labels)
+        rancher_kind = {
+            "deployment": "apps.deployment",
+            "statefulset": "apps.statefulset",
+            "daemonset": "apps.daemonset",
+            "job": "batch.job",
+            "pod": "pod",
+        }.get(kind, "")
+        if rancher_kind and name and namespace:
+            url = f"{base}/{rancher_kind}/{quote(namespace, safe='')}/{quote(name, safe='')}"
+            if kind != "pod":
+                url += "#pods"
+            return Link("Rancher", url)
         node = node_name(labels)
-        if node and not pod:
+        if node and kind != "pod":
             return Link("Rancher", f"{base}/node/{quote(node, safe='')}#pods")
         return None
+
+
+def _loki_explore(expr: str) -> str:
+    panes = {
+        "logs": {
+            "datasource": LOKI_DATASOURCE,
+            "queries": [
+                {
+                    "refId": "A",
+                    "expr": expr,
+                    "queryType": "range",
+                    "datasource": {"type": "loki", "uid": LOKI_DATASOURCE},
+                }
+            ],
+            "range": {"from": "now-1h", "to": "now"},
+        }
+    }
+    encoded = quote(json.dumps(panes, separators=(",", ":")), safe="")
+    return f"{GRAFANA_URL}/explore?schemaVersion=1&orgId=1&panes={encoded}"
 
 
 class LogsLink(LinkProvider):
@@ -251,17 +295,14 @@ class LogsLink(LinkProvider):
 
     def match(self, labels: dict[str, str]) -> Link | None:
         namespace = labels.get("namespace", "")
-        if not namespace:
+        kind, name = subject(labels)
+        if not namespace or not name:
             return None
-        pod = labels.get("pod", "")
-        _kind, work = workload(labels)
-        if pod:
-            expr = '{namespace="%s",pod="%s"}' % (_logql(namespace), _logql(pod))
-        elif work:
-            expr = '{namespace="%s",pod=~"%s-.*"}' % (_logql(namespace), _logql(work))
+        if kind == "pod":
+            expr = '{k8s_namespace_name="%s", k8s_pod_name="%s"}' % (_logql(namespace), _logql(name))
         else:
-            return None
-        return Link("Logs", _explore(LOKI_DATASOURCE, expr, "expr"))
+            expr = '{k8s_namespace_name="%s", k8s_pod_name=~"%s-.+"}' % (_logql(namespace), _logql(name))
+        return Link("Logs", _loki_explore(expr))
 
 
 class ArgoLink(LinkProvider):
@@ -330,14 +371,11 @@ def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     name = labels.get("alertname") or str(payload.get("name") or "alert")
     labels["alertname"] = name
     namespace = labels.get("namespace", "")
-    pod = labels.get("pod", "")
-    kind, work = workload(labels)
+    kind, work = subject(labels)
     node = node_name(labels)
-    if pod and namespace:
-        where = f"{namespace} / {pod}"
-    elif work and namespace:
+    if work and namespace:
         where = f"{namespace} / {work}"
-    elif node and not pod:
+    elif node and kind != "pod":
         where = node
     else:
         where = ""
