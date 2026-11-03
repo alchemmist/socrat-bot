@@ -37,6 +37,7 @@ from socrat_bot.models import Action, Broadcast, TelegramCard, User
 
 ptb: Application | None = None
 _updates: set[asyncio.Task] = set()
+_card_locks: dict[str, asyncio.Lock] = {}
 
 
 class Href(BaseModel):
@@ -531,7 +532,8 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                     incoming.append(copied)
             buttons: list[tuple[str, str, int]] = []
             action_ids: list[uuid.UUID] = []
-            existing = stored.message_id if stored is not None and stored.message_id else None
+            fresh = stored is not None and card is not None and card.firing and stored.status == "resolved"
+            existing = None if fresh else stored.message_id if stored is not None and stored.message_id else None
             for item in incoming:
                 row = create_action(
                     db,
@@ -548,54 +550,67 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                     buttons.append((item.get("label") or row.type, f"act:{row.id}", int(item.get("row") or 0)))
             return existing, buttons, action_ids, stored.key if stored is not None else None
 
-    existing, buttons, action_ids, card_key = await asyncio.to_thread(prepare)
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    markup = keyboard(buttons)
-    async with httpx.AsyncClient(timeout=20) as client:
-        if existing is not None:
-            edit = {
-                "chat_id": body.chat_id,
-                "message_id": existing,
-                "text": text,
-                "reply_markup": markup.to_dict() if markup else {"inline_keyboard": []},
-            }
-            if parse_mode:
-                edit["parse_mode"] = parse_mode
-            response = await client.post(f"https://api.telegram.org/bot{token}/editMessageText", json=edit)
-            data = response.json()
-            if not data.get("ok") and "message is not modified" not in str(data):
-                raise HTTPException(status_code=502, detail=data)
-            message_id = existing
-            replayed = True
-        else:
-            payload = {"chat_id": body.chat_id, "text": text}
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
-            if markup:
-                payload["reply_markup"] = markup.to_dict()
-            response = await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
-            data = response.json()
-            if not data.get("ok"):
-                raise HTTPException(status_code=502, detail=data)
-            message_id = data["result"]["message_id"]
-            replayed = False
+    lock = _card_locks.setdefault(card.key, asyncio.Lock()) if card is not None else None
+    if lock is not None:
+        await lock.acquire()
+    try:
+        existing, buttons, action_ids, card_key = await asyncio.to_thread(prepare)
+        token = os.environ["TELEGRAM_BOT_TOKEN"]
+        markup = keyboard(buttons)
+        async with httpx.AsyncClient(timeout=20) as client:
+            if existing is not None:
+                edit = {
+                    "chat_id": body.chat_id,
+                    "message_id": existing,
+                    "text": text,
+                    "reply_markup": markup.to_dict() if markup else {"inline_keyboard": []},
+                }
+                if parse_mode:
+                    edit["parse_mode"] = parse_mode
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/editMessageText",
+                    json=edit,
+                )
+                data = response.json()
+                if not data.get("ok") and "message is not modified" not in str(data):
+                    raise HTTPException(status_code=502, detail=data)
+                message_id = existing
+                replayed = True
+            else:
+                payload = {"chat_id": body.chat_id, "text": text}
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                if markup:
+                    payload["reply_markup"] = markup.to_dict()
+                response = await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
+                data = response.json()
+                if not data.get("ok"):
+                    raise HTTPException(status_code=502, detail=data)
+                message_id = data["result"]["message_id"]
+                replayed = False
 
-    def persist() -> None:
-        with session() as db:
-            for action_id in action_ids:
-                row = db.get(Action, action_id)
-                if row is not None:
-                    row.message_id = message_id
-            if card_key is not None:
-                stored = db.get(TelegramCard, card_key)
-                if stored is not None:
-                    stored.message_id = message_id
+        def persist() -> None:
+            with session() as db:
+                for action_id in action_ids:
+                    row = db.get(Action, action_id)
+                    if row is not None:
+                        row.message_id = message_id
+                if card_key is not None and card is not None:
+                    stored = db.get(TelegramCard, card_key)
+                    if stored is not None:
+                        if card.firing and stored.status == "resolved":
+                            stored.generation += 1
+                        stored.status = "firing" if card.firing else "resolved"
+                        stored.message_id = message_id
 
-    await asyncio.to_thread(persist)
-    body_out = {"id": message_id, "chat_id": body.chat_id}
-    if replayed:
-        body_out["replayed"] = True
-    return body_out
+        await asyncio.to_thread(persist)
+        body_out = {"id": message_id, "chat_id": body.chat_id}
+        if replayed:
+            body_out["replayed"] = True
+        return body_out
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 @api.patch("/v1/messages/{message_id}")

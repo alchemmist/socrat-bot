@@ -18,6 +18,7 @@ from socrat_bot.logic import (
     format_vpn_clients,
     issue_link_code,
     mark_vpn,
+    open_card,
     mailing_hours,
     schedule_broadcast,
     vpn_audience,
@@ -122,6 +123,17 @@ def test_vpn_client_list_prefers_username():
         ]
     )
     assert shown == "VPN clients: 2\n\u2022 1\n\u2022 @ada"
+
+
+def test_open_card_keeps_the_message_until_telegram_accepts():
+    with session() as db:
+        row = open_card(db, "Node/pod/ns/name", 1, True)
+        row.message_id = 10
+        row.status = "resolved"
+        db.flush()
+        again = open_card(db, "Node/pod/ns/name", 1, True)
+        assert again.message_id == 10
+        assert again.status == "resolved"
 
 
 def test_mark_vpn_does_not_demote_the_owner():

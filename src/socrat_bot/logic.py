@@ -155,18 +155,18 @@ def create_action(
 
 
 def open_card(db: Session, key: str, chat_id: int, firing: bool) -> TelegramCard:
-    """Return the live card row. A firing alert after resolve starts a new message."""
+    """Return the card row without changing its Telegram message.
+
+    Status and message id are stored only after Telegram accepts the update.
+    """
+    del firing
     row = db.get(TelegramCard, key)
     if row is None:
-        row = TelegramCard(key=key, chat_id=chat_id, generation=1, status="firing" if firing else "resolved")
+        row = TelegramCard(key=key, chat_id=chat_id, generation=1, status="firing")
         db.add(row)
         db.flush()
         return row
     row.chat_id = chat_id
-    if firing and row.status == "resolved":
-        row.generation += 1
-        row.message_id = None
-    row.status = "firing" if firing else "resolved"
     return row
 
 
