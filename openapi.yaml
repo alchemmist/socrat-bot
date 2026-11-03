@@ -262,6 +262,32 @@ paths:
                 $ref: "#/components/schemas/CardList"
         "401":
           description: Нет или неверный X-Internal-Token
+  /v1/cards/item:
+    get:
+      tags: [alerts]
+      operationId: getCard
+      summary: Одна карточка по ключу
+      description: |
+        Ключ берётся из списка карточек или из ответа POST /v1/messages.
+        В ключе бывают слэши, поэтому он передаётся параметром key, а не частью пути.
+        Возвращает и открытую, и уже закрытую карточку.
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Карточка и её копии
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardSummary"
+        "401":
+          description: Нет или неверный X-Internal-Token
+        "404":
+          description: Карточка с таким ключом не отправлялась
   /v1/cards/notes:
     post:
       tags: [alerts]
@@ -489,6 +515,42 @@ components:
           type: string
         alert:
           $ref: "#/components/schemas/Alert"
+    CardSummary:
+      type: object
+      required: [key, status, copies]
+      properties:
+        key:
+          type: string
+        status:
+          type: string
+          enum: [firing, resolved]
+        text_stored:
+          type: boolean
+        spi_url:
+          type: string
+          nullable: true
+        spi_label:
+          type: string
+          nullable: true
+        note:
+          type: string
+          nullable: true
+        copies:
+          type: array
+          items:
+            type: object
+            properties:
+              chat_id:
+                type: integer
+                format: int64
+              message_id:
+                type: integer
+                format: int64
+                nullable: true
+              status:
+                type: string
+              text_stored:
+                  type: boolean
     CardList:
       type: object
       properties:

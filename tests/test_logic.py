@@ -17,6 +17,7 @@ from socrat_bot.logic import (
     approve_alerts,
     card_messages,
     audience,
+    get_card,
     list_cards,
     ensure_user,
     format_vpn_clients,
@@ -215,4 +216,6 @@ def test_audience_and_open_cards():
         assert [card["key"] for card in firing] == ["Disk/pod/ns/a"]
         assert firing[0]["text_stored"] is True
         assert firing[0]["copies"][0]["message_id"] == 10
+        assert get_card(db, "Disk/pod/ns/a")["status"] == "firing"
+        assert get_card(db, "missing") is None
         assert list_cards(db, "all").__len__() == 2

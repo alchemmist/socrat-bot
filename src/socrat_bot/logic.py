@@ -231,6 +231,37 @@ def audience(db: Session) -> dict:
     return {"vpn": [person(user) for user in vpn], "alerts": [person(user) for user in alert_recipients(db)]}
 
 
+
+def card_view(key: str, copies: list[TelegramCard]) -> dict:
+    statuses = {row.status for row in copies}
+    spi = next((row for row in copies if row.spi_url), None)
+    note = next((row.note for row in copies if row.note), None)
+    return {
+        "key": key,
+        "status": "firing" if "firing" in statuses else "resolved",
+        "text_stored": any(bool(row.text) for row in copies),
+        "spi_url": spi.spi_url if spi else None,
+        "spi_label": spi.spi_label if spi else None,
+        "note": note,
+        "copies": [
+            {
+                "chat_id": row.chat_id,
+                "message_id": row.message_id,
+                "status": row.status,
+                "text_stored": bool(row.text),
+            }
+            for row in copies
+        ],
+    }
+
+
+def get_card(db: Session, key: str) -> dict | None:
+    rows = list(db.scalars(select(TelegramCard).where(TelegramCard.key == key).order_by(TelegramCard.chat_id)))
+    if not rows:
+        return None
+    return card_view(key, rows)
+
+
 def list_cards(db: Session, status: str = "firing") -> list[dict]:
     rows = list(db.scalars(select(TelegramCard).order_by(TelegramCard.key, TelegramCard.chat_id)))
     grouped: dict[str, list[TelegramCard]] = {}
@@ -238,29 +269,10 @@ def list_cards(db: Session, status: str = "firing") -> list[dict]:
         grouped.setdefault(row.key, []).append(row)
     cards = []
     for key, copies in grouped.items():
-        statuses = {row.status for row in copies}
-        card_status = "firing" if "firing" in statuses else "resolved"
-        if status != "all" and card_status != status:
+        view = card_view(key, copies)
+        if status != "all" and view["status"] != status:
             continue
-        spi = next((row for row in copies if row.spi_url), None)
-        note = next((row.note for row in copies if row.note), None)
-        cards.append({
-            "key": key,
-            "status": card_status,
-            "text_stored": any(bool(row.text) for row in copies),
-            "spi_url": spi.spi_url if spi else None,
-            "spi_label": spi.spi_label if spi else None,
-            "note": note,
-            "copies": [
-                {
-                    "chat_id": row.chat_id,
-                    "message_id": row.message_id,
-                    "status": row.status,
-                    "text_stored": bool(row.text),
-                }
-                for row in copies
-            ],
-        })
+        cards.append(view)
     return cards
 
 

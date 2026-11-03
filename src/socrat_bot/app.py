@@ -17,6 +17,7 @@ from socrat_bot.grafana_rules import start_rule_refresh
 from socrat_bot.logic import (
     alert_recipients,
     audience,
+    get_card,
     list_cards,
     apply_action,
     approve_alerts,
@@ -875,6 +876,19 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
     await asyncio.to_thread(save)
     return {"key": key, "updated": updated}
 
+
+
+
+@api.get("/v1/cards/item")
+def get_card_item(key: str, x_internal_token: str | None = Header(default=None)):
+    require_internal(x_internal_token)
+    if not key:
+        raise HTTPException(status_code=400, detail="key required")
+    with session() as db:
+        found = get_card(db, key)
+    if found is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    return found
 
 
 @api.get("/v1/cards")
