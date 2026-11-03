@@ -74,6 +74,16 @@ A non-alert card uses the same renderer:
 
 `links` names providers. Unknown names are rejected. `hrefs` are extra URLs for that message only. Mute buttons are added for a firing alert when `actions` is empty.
 
+A later workflow can attach a GitHub issue to every copy of a card:
+
+```
+POST /v1/cards/links
+X-Internal-Token: ...
+{"alert": {"labels": {"alertname": "TargetDown", "namespace": "lms"}}, "url": "https://github.com/org/repo/issues/4"}
+```
+
+The link label is `SPI`. The same alert sent again keeps the link. `key` may be sent instead of `alert`. A card that has not been rendered since this field existed answers `409` until the next alert update stores its text.
+
 ## VPN list and scheduled broadcast
 
 `/start` stores the Telegram user. The reply is `Socrat is online.` with `I use VPN` and `Subscribe to alerts` until each one is done. Pressing the VPN button sets `uses_vpn` and does not change an owner into a regular user. A normal user becomes role `vpn`. The broadcast audience is everyone with `uses_vpn`, including an owner who opted in. A panel link code is separate and does not by itself add the person to this list.

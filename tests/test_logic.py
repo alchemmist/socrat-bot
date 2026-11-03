@@ -25,7 +25,7 @@ from socrat_bot.logic import (
     schedule_broadcast,
     vpn_audience,
 )
-from socrat_bot.models import Action, Audit, Broadcast, LinkCode, SudoRequest, User
+from socrat_bot.models import Action, Audit, Broadcast, LinkCode, SudoRequest, TelegramCard, User
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +37,7 @@ def fresh_schema():
         db.execute(delete(Audit))
         db.execute(delete(Action))
         db.execute(delete(LinkCode))
+        db.execute(delete(TelegramCard))
         db.execute(delete(User))
     yield
 

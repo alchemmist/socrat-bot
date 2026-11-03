@@ -81,6 +81,9 @@ class TelegramCard(Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     generation: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(32), default="firing")
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spi_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spi_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class SudoRequest(Base):

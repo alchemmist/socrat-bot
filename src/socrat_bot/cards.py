@@ -414,6 +414,29 @@ def render_card(card: Card) -> str:
     return "\n".join(lines)
 
 
+
+def add_link(text: str, url: str, label: str = "SPI") -> str:
+    """Add one HTML link to a rendered card without dropping a mute footer."""
+    link = f'<a href="{_esc(url)}">{_esc(label)}</a>'
+    if url in text or link in text:
+        return text
+    lines = text.split("\n")
+    footer = ""
+    if lines and lines[-1].startswith("<i>") and lines[-1].endswith("</i>"):
+        footer = lines.pop()
+        if lines and lines[-1] == "":
+            lines.pop()
+    for index, line in enumerate(lines):
+        if "<a href=" in line:
+            lines[index] = line + " · " + link
+            break
+    else:
+        lines.append(link)
+    if footer:
+        lines.extend(["", footer])
+    return "\n".join(lines)
+
+
 def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     labels = labels_of(payload.get("labels"))
     annotations = labels_of(payload.get("annotations"))
