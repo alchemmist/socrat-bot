@@ -147,16 +147,45 @@ def workload(labels: dict[str, str]) -> tuple[str, str]:
     return "", ""
 
 
-def _exporter_pod(labels: dict[str, str]) -> bool:
-    """kube-state-metrics stamps its own pod onto the series it exposes."""
+def _node_exporter(labels: dict[str, str]) -> bool:
     pod = labels.get("pod", "")
+    return (
+        labels.get("job") == "node-exporter"
+        or labels.get("container") == "node-exporter"
+        or "node-exporter" in pod
+    )
+
+
+def _exporter_pod(labels: dict[str, str]) -> bool:
+    """The scrape pod is not the object when the metric is about something else."""
+    pod = labels.get("pod", "")
+    if _node_exporter(labels):
+        return True
     if "kube-state-metrics" in pod or labels.get("container") == "kube-state-metrics":
         return True
     return bool(labels.get("prometheus_replica") and pod.startswith("prometheus-"))
 
 
+def systemd_unit(labels: dict[str, str]) -> str:
+    if not _node_exporter(labels):
+        return ""
+    return labels.get("name", "")
+
+
+def exporter_daemonset(labels: dict[str, str]) -> tuple[str, str]:
+    service = labels.get("service", "")
+    namespace = labels.get("namespace", "")
+    pod = labels.get("pod", "")
+    if namespace and service and pod.startswith(service + "-"):
+        return namespace, service
+    return "", ""
+
+
 def subject(labels: dict[str, str]) -> tuple[str, str]:
     """What the card is about: a workload, or a pod when that pod is the object."""
+    unit = systemd_unit(labels)
+    if unit:
+        return "systemd", unit
     kind, work = workload(labels)
     pod = "" if _exporter_pod(labels) else labels.get("pod", "")
     if kind and (not pod or not pod.startswith(work + "-")):
@@ -182,7 +211,10 @@ def card_key(alertname: str, labels: dict[str, str]) -> str:
     namespace = labels.get("namespace", "")
     kind, name = subject(labels)
     node = node_name(labels)
-    if kind and name and namespace:
+    if kind == "systemd" and name:
+        host = node or labels.get("instance", "").split(":", 1)[0] or "host"
+        ident = f"systemd/{host}/{name}"
+    elif kind and name and namespace:
         ident = f"{kind}/{namespace}/{name}"
     elif node and kind != "pod":
         ident = f"node/{node}"
@@ -202,6 +234,11 @@ def object_matchers(alertname: str, labels: dict[str, str]) -> list[dict]:
     node = node_name(labels)
     if kind == "pod" and namespace:
         pairs.extend((("namespace", namespace), ("pod", name)))
+    elif kind == "systemd" and name:
+        pairs.append(("name", name))
+        instance = labels.get("instance", "")
+        if instance:
+            pairs.append(("instance", instance))
     elif kind and name and namespace:
         label = "job_name" if kind == "job" else kind
         pairs.extend((("namespace", namespace), (label, name)))
@@ -260,6 +297,13 @@ class RancherLink(LinkProvider):
             "job": "batch.job",
             "pod": "pod",
         }.get(kind, "")
+        if kind == "systemd":
+            namespace, daemonset = exporter_daemonset(labels)
+            if namespace and daemonset:
+                return Link(
+                    "Rancher",
+                    f"{base}/apps.daemonset/{quote(namespace, safe='')}/{quote(daemonset, safe='')}#pods",
+                )
         if rancher_kind and name and namespace:
             url = f"{base}/{rancher_kind}/{quote(namespace, safe='')}/{quote(name, safe='')}"
             if kind != "pod":
@@ -296,6 +340,9 @@ class LogsLink(LinkProvider):
     def match(self, labels: dict[str, str]) -> Link | None:
         namespace = labels.get("namespace", "")
         kind, name = subject(labels)
+        if kind == "systemd":
+            namespace, name = exporter_daemonset(labels)
+            kind = "daemonset"
         if not namespace or not name:
             return None
         # k8s_pod_name is Loki structured metadata, not an indexed stream label.
@@ -375,7 +422,10 @@ def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     namespace = labels.get("namespace", "")
     kind, work = subject(labels)
     node = node_name(labels)
-    if work and namespace:
+    if kind == "systemd" and work:
+        host = node or labels.get("instance", "").split(":", 1)[0]
+        where = f"{host} / {work}" if host else work
+    elif work and namespace:
         where = f"{namespace} / {work}"
     elif node and kind != "pod":
         where = node

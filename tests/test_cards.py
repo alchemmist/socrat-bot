@@ -13,8 +13,12 @@ def _pod():
             "labels": {
                 "alertname": "NodeSystemdServiceFailed",
                 "namespace": "cattle-monitoring-system",
-                "pod": "node-exporter-dt68v",
-                "node": "socrat-2",
+                "pod": "kube-prometheus-stack-prometheus-node-exporter-dt68v",
+                "service": "kube-prometheus-stack-prometheus-node-exporter",
+                "job": "node-exporter",
+                "container": "node-exporter",
+                "name": "otel-history-tail-pipeline-20261101.service",
+                "instance": "192.168.0.23:9100",
             },
             "annotations": {"summary": "Systemd service has entered failed state."},
         }
@@ -24,10 +28,16 @@ def _pod():
 def test_firing_card_has_no_count_header():
     text = render_card(_pod())
     assert text.startswith("<b>NodeSystemdServiceFailed</b>")
+    assert "192.168.0.23 / otel-history-tail-pipeline-20261101.service" in text
     assert "Firing" not in text
     assert "Alert" in text and "Rancher" in text and "Logs" in text
     assert "Nodes" not in text
     assert "Argo CD" not in text
+    rancher = next(link for link in _pod().links if link.label == "Rancher")
+    assert rancher.url.endswith(
+        "/apps.daemonset/cattle-monitoring-system/kube-prometheus-stack-prometheus-node-exporter#pods"
+    )
+    assert "dt68v" not in rancher.url
 
 
 def test_node_card_uses_dashboard_and_rancher_node():
@@ -118,4 +128,6 @@ def test_job_alert_opens_the_batch_job():
 def test_same_pod_keeps_one_key():
     first = _pod()
     second = _pod()
-    assert first.key == second.key == "NodeSystemdServiceFailed/pod/cattle-monitoring-system/node-exporter-dt68v"
+    assert first.key == second.key == (
+        "NodeSystemdServiceFailed/systemd/192.168.0.23/otel-history-tail-pipeline-20261101.service"
+    )
