@@ -437,6 +437,40 @@ def add_link(text: str, url: str, label: str = "SPI") -> str:
     return "\n".join(lines)
 
 
+
+
+def add_note(text: str, note: str) -> str:
+    """Append one short plain-text line, keeping a mute footer below it."""
+    cleaned = " ".join(note.split())
+    if not cleaned:
+        return text
+    if len(cleaned) > 240:
+        raise ValueError("note is too long")
+    line = _esc(cleaned)
+    lines = text.splitlines()
+    # splitlines drops the separator; keep blank lines by splitting explicitly
+    lines = text.split(chr(10))
+    footer = ""
+    if lines and lines[-1].startswith("<i>") and lines[-1].endswith("</i>"):
+        footer = lines.pop()
+        if lines and lines[-1] == "":
+            lines.pop()
+    if line not in lines:
+        lines.append(line)
+    if footer:
+        lines.extend(["", footer])
+    return chr(10).join(lines)
+
+
+def replace_note(text: str, previous: str | None, note: str) -> str:
+    """Swap a previously stored note line, then add the new one."""
+    if previous:
+        old = _esc(" ".join(previous.split()))
+        kept = [line for line in text.split(chr(10)) if line != old]
+        text = chr(10).join(kept).strip(chr(10))
+    return add_note(text, note)
+
+
 def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     labels = labels_of(payload.get("labels"))
     annotations = labels_of(payload.get("annotations"))

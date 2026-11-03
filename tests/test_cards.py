@@ -135,3 +135,14 @@ def test_same_pod_keeps_one_key():
     assert first.key == second.key == (
         "NodeSystemdServiceFailed/systemd/192.168.0.23/otel-history-tail-pipeline-20261101.service"
     )
+
+def test_note_stays_above_the_mute_footer():
+    from socrat_bot.cards import add_note, replace_note
+    text = "<b>Disk</b>\n\n<i>Muted for 15 minutes.</i>"
+    noted = add_note(text, "same incident")
+    assert noted.endswith("<i>Muted for 15 minutes.</i>")
+    assert "same incident" in noted.split("<i>")[0]
+    again = replace_note(noted, "same incident", "same incident")
+    assert again.count("same incident") == 1
+    swapped = replace_note(again, "same incident", "false positive")
+    assert "same incident" not in swapped and "false positive" in swapped

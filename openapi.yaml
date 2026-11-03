@@ -6,6 +6,7 @@ info:
     Внутренний API бота Socrat. Через него другие процессы кластера
     отправляют карточки алертов, дописывают ссылки и ставят служебные задачи.
     Публично доступен только webhook Telegram.
+    Если задан ACTION_WEBHOOK_URL, бот после кнопки шлёт POST: vpn.opt_in, alerts.approved или alert.muted. Без адреса события наружу не уходят.
 servers:
   - url: http://socrat-bot.socrat-bot.svc:8080
     description: Внутренний адрес бота в кластере
@@ -236,6 +237,76 @@ paths:
           description: Обновление принято
         "401":
           description: Секрет webhook не совпал
+  /v1/cards:
+    get:
+      tags: [alerts]
+      operationId: listCards
+      summary: Открытые карточки и их копии
+      description: |
+        По умолчанию только ещё открытые (firing). status=resolved или status=all меняет выбор.
+        text_stored=false значит текст карточки ещё не сохранён и ссылку или заметку писать рано (будет 409).
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [firing, resolved, all]
+            default: firing
+      responses:
+        "200":
+          description: Карточки
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardList"
+        "401":
+          description: Нет или неверный X-Internal-Token
+  /v1/cards/notes:
+    post:
+      tags: [alerts]
+      operationId: addCardNote
+      summary: Дописать или заменить короткую заметку на карточке
+      description: |
+        Одна строка без HTML, не длиннее 240 символов. Попадает во все копии и сохраняется
+        при следующем обновлении алерта. Повтор той же строки ничего не дублирует.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CardNote"
+      responses:
+        "200":
+          description: Заметка записана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardLinkResult"
+        "400":
+          description: Нет ключа или заметка пустая либо слишком длинная
+        "401":
+          description: Нет или неверный X-Internal-Token
+        "404":
+          description: Карточка ещё не отправлялась
+        "409":
+          description: У карточки ещё не сохранён текст
+  /v1/audience:
+    get:
+      tags: [alerts, vpn]
+      operationId: getAudience
+      summary: Кто на VPN и кто подписан на алерты
+      description: |
+        username без символа @. Его может не быть, тогда остаётся telegram_id.
+        Список VPN — только те, кто нажал «I use VPN», не все, кто нажал /start.
+      responses:
+        "200":
+          description: Два списка
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Audience"
+        "401":
+          description: Нет или неверный X-Internal-Token
   /healthz:
     get:
       tags: [health]
@@ -388,3 +459,94 @@ components:
           format: int64
         replayed:
           type: boolean
+        key:
+          type: string
+          description: Ключ карточки. Для обычного сообщения нет.
+        copies:
+          type: array
+          description: Каждая отправленная копия.
+          items:
+            type: object
+            required: [chat_id, message_id]
+            properties:
+              chat_id:
+                type: integer
+                format: int64
+              message_id:
+                type: integer
+                format: int64
+              replayed:
+                type: boolean
+    CardNote:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          maxLength: 240
+        key:
+          type: string
+        alert:
+          $ref: "#/components/schemas/Alert"
+    CardList:
+      type: object
+      properties:
+        cards:
+          type: array
+          items:
+            type: object
+            required: [key, status, copies]
+            properties:
+              key:
+                type: string
+              status:
+                type: string
+                enum: [firing, resolved]
+              text_stored:
+                type: boolean
+              spi_url:
+                type: string
+                nullable: true
+              spi_label:
+                type: string
+                nullable: true
+              note:
+                type: string
+                nullable: true
+              copies:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    chat_id:
+                      type: integer
+                      format: int64
+                    message_id:
+                      type: integer
+                      format: int64
+                      nullable: true
+                    status:
+                      type: string
+                    text_stored:
+                      type: boolean
+    Audience:
+      type: object
+      properties:
+        vpn:
+          type: array
+          items:
+            $ref: "#/components/schemas/Person"
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Person"
+    Person:
+      type: object
+      required: [telegram_id]
+      properties:
+        telegram_id:
+          type: integer
+          format: int64
+        username:
+          type: string
+          nullable: true

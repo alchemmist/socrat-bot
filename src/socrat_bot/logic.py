@@ -222,6 +222,48 @@ def card_messages(db: Session, key: str) -> list[tuple[int, int]]:
     return [(row.chat_id, int(row.message_id)) for row in rows if row.message_id]
 
 
+
+def audience(db: Session) -> dict:
+    def person(user: User) -> dict:
+        return {"telegram_id": user.telegram_id, "username": user.username}
+
+    vpn = sorted(vpn_audience(db), key=lambda user: user.telegram_id)
+    return {"vpn": [person(user) for user in vpn], "alerts": [person(user) for user in alert_recipients(db)]}
+
+
+def list_cards(db: Session, status: str = "firing") -> list[dict]:
+    rows = list(db.scalars(select(TelegramCard).order_by(TelegramCard.key, TelegramCard.chat_id)))
+    grouped: dict[str, list[TelegramCard]] = {}
+    for row in rows:
+        grouped.setdefault(row.key, []).append(row)
+    cards = []
+    for key, copies in grouped.items():
+        statuses = {row.status for row in copies}
+        card_status = "firing" if "firing" in statuses else "resolved"
+        if status != "all" and card_status != status:
+            continue
+        spi = next((row for row in copies if row.spi_url), None)
+        note = next((row.note for row in copies if row.note), None)
+        cards.append({
+            "key": key,
+            "status": card_status,
+            "text_stored": any(bool(row.text) for row in copies),
+            "spi_url": spi.spi_url if spi else None,
+            "spi_label": spi.spi_label if spi else None,
+            "note": note,
+            "copies": [
+                {
+                    "chat_id": row.chat_id,
+                    "message_id": row.message_id,
+                    "status": row.status,
+                    "text_stored": bool(row.text),
+                }
+                for row in copies
+            ],
+        })
+    return cards
+
+
 def alert_recipients(db: Session) -> list[User]:
     return list(db.scalars(select(User).where(User.alerts_enabled.is_(True)).order_by(User.telegram_id)))
 

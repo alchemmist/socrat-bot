@@ -16,6 +16,8 @@ from socrat_bot.logic import (
     create_action,
     approve_alerts,
     card_messages,
+    audience,
+    list_cards,
     ensure_user,
     format_vpn_clients,
     issue_link_code,
@@ -188,3 +190,29 @@ def test_scheduled_broadcast_is_claimed_when_due():
         due = claim_due_broadcasts(db, now=datetime(2026, 4, 2, 12, tzinfo=timezone.utc))
         assert [item.id for item in due] == [row.id]
         assert row.status == "sending"
+
+
+def test_audience_and_open_cards():
+    with session() as db:
+        ensure_user(db, 1, "owner")
+        approve_alerts(db, 1, "owner")
+        mark_vpn(db, 2, "vpnuser")
+        open_card(db, "Disk/pod/ns/a", 1, True)
+        row = db.get(TelegramCard, ("Disk/pod/ns/a", 1))
+        row.message_id = 10
+        row.text = "<b>Disk</b>"
+        row.status = "firing"
+        open_card(db, "Old/pod/ns/b", 1, True)
+        done = db.get(TelegramCard, ("Old/pod/ns/b", 1))
+        done.status = "resolved"
+        done.text = "done"
+    with session() as db:
+        people = audience(db)
+        assert {item["telegram_id"] for item in people["vpn"]} == {2}
+        assert people["vpn"][0]["username"] == "vpnuser"
+        assert [item["telegram_id"] for item in people["alerts"]] == [1]
+        firing = list_cards(db, "firing")
+        assert [card["key"] for card in firing] == ["Disk/pod/ns/a"]
+        assert firing[0]["text_stored"] is True
+        assert firing[0]["copies"][0]["message_id"] == 10
+        assert list_cards(db, "all").__len__() == 2
