@@ -38,6 +38,10 @@ def test_firing_card_has_no_count_header():
         "/apps.daemonset/cattle-monitoring-system/kube-prometheus-stack-prometheus-node-exporter#pods"
     )
     assert "dt68v" not in rancher.url
+    logs = next(link for link in _pod().links if link.label == "Logs")
+    query = unquote(logs.url)
+    assert 'service_name=\\"otel-history-tail-pipeline-20261101.service\\"' in query
+    assert "dt68v" not in query
 
 
 def test_node_card_uses_dashboard_and_rancher_node():

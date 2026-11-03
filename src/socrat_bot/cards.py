@@ -315,7 +315,7 @@ class RancherLink(LinkProvider):
         return None
 
 
-def _loki_explore(expr: str) -> str:
+def _loki_explore(expr: str, start: str = "now-1h") -> str:
     panes = {
         "logs": {
             "datasource": LOKI_DATASOURCE,
@@ -327,7 +327,7 @@ def _loki_explore(expr: str) -> str:
                     "datasource": {"type": "loki", "uid": LOKI_DATASOURCE},
                 }
             ],
-            "range": {"from": "now-1h", "to": "now"},
+            "range": {"from": start, "to": "now"},
         }
     }
     encoded = quote(json.dumps(panes, separators=(",", ":")), safe="")
@@ -341,8 +341,8 @@ class LogsLink(LinkProvider):
         namespace = labels.get("namespace", "")
         kind, name = subject(labels)
         if kind == "systemd":
-            namespace, name = exporter_daemonset(labels)
-            kind = "daemonset"
+            expr = '{service_name="%s"}' % _logql(name)
+            return Link("Logs", _loki_explore(expr, "now-24h"))
         if not namespace or not name:
             return None
         # k8s_pod_name is Loki structured metadata, not an indexed stream label.
