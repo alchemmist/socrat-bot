@@ -15,7 +15,9 @@ from socrat_bot.cards import Card, Link, build_alert, mute_actions, render_card,
 from socrat_bot.db import init_schema, session
 from socrat_bot.grafana_rules import start_rule_refresh
 from socrat_bot.logic import (
+    alert_recipients,
     apply_action,
+    approve_alerts,
     broadcast_zone,
     claim_due_broadcasts,
     consume_link,
@@ -30,6 +32,7 @@ from socrat_bot.logic import (
     mailing_slot,
     mark_vpn,
     open_card,
+    owners,
     schedule_broadcast,
     vpn_audience,
 )
@@ -130,23 +133,19 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     already = False
     with session() as db:
         person = ensure_user(db, user.id, user.username)
-        already = bool(person.uses_vpn)
+        uses_vpn = bool(person.uses_vpn)
+        alerts = bool(person.alerts_enabled)
         print(f"telegram_start id={user.id} role={person.role}", flush=True)
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
         else:
-            text = "Socrat is online."
+            text = _start_text(uses_vpn, alerts)
     if arg.startswith("link_"):
         await update.message.reply_text(text)
         return
-    if already:
-        await update.message.reply_text("Socrat is online.\nYou are on the VPN list.")
-        return
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("I use VPN", callback_data="vpn:yes")]]),
-    )
+    keyboard = _start_keyboard(uses_vpn, alerts)
+    await update.message.reply_text(text, reply_markup=keyboard)
 
 
 def _date_keyboard(broadcast_id: uuid.UUID, now: datetime) -> InlineKeyboardMarkup:
@@ -205,6 +204,31 @@ async def _remember_usernames(telegram_ids: list[int]) -> None:
             person = db.scalar(select(User).where(User.telegram_id == telegram_id))
             if person is not None:
                 person.username = username
+
+
+def _start_text(uses_vpn: bool, alerts: bool) -> str:
+    lines = ["Socrat is online."]
+    if uses_vpn:
+        lines.append("You are on the VPN list.")
+    if alerts:
+        lines.append("You are subscribed to alerts.")
+    return "\n".join(lines)
+
+
+def _start_keyboard(uses_vpn: bool, alerts: bool) -> InlineKeyboardMarkup | None:
+    buttons = []
+    if not uses_vpn:
+        buttons.append(InlineKeyboardButton("I use VPN", callback_data="vpn:yes"))
+    if not alerts:
+        buttons.append(InlineKeyboardButton("Subscribe to alerts", callback_data="al:yes"))
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup([buttons])
+
+
+def _person_label(user) -> str:
+    username = getattr(user, "username", None)
+    return f"@{username}" if username else str(user.id)
 
 
 async def on_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -323,11 +347,71 @@ async def _on_mailing_callback(query, data: str) -> bool:
     return True
 
 
+async def _request_alerts(query) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    user = query.from_user
+    with session() as db:
+        person = ensure_user(db, user.id, user.username)
+        if person.alerts_enabled:
+            text = _start_text(bool(person.uses_vpn), True)
+            keyboard = _start_keyboard(bool(person.uses_vpn), True)
+            try:
+                await query.edit_message_text(text, reply_markup=keyboard)
+            except Exception:
+                pass
+            return
+        targets = [(owner.telegram_id, owner.username) for owner in owners(db)]
+    if not targets:
+        await query.message.reply_text("No owner is available to approve this.")
+        return
+    label = _person_label(user)
+    for telegram_id, _username in targets:
+        await query.get_bot().send_message(
+            telegram_id,
+            f"{label} wants alert notifications.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Approve", callback_data=f"al:ok:{user.id}")]]
+            ),
+        )
+    await query.message.reply_text("Request sent. An owner has to approve it.")
+
+
+async def _approve_alerts(query) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    try:
+        telegram_id = int(query.data.removeprefix("al:ok:"))
+    except ValueError:
+        return
+    with session() as db:
+        if not is_owner(db, query.from_user.id):
+            await query.edit_message_text("This action is available to the owner only.")
+            return
+        person = approve_alerts(db, telegram_id)
+        label = f"@{person.username}" if person.username else str(person.telegram_id)
+    await query.edit_message_text(f"Approved {label}.")
+    try:
+        await query.get_bot().send_message(telegram_id, "You are subscribed to alerts.")
+    except Exception:
+        pass
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
         return
     if await _on_mailing_callback(query, query.data):
+        return
+    if query.data == "al:yes":
+        await _request_alerts(query)
+        return
+    if query.data.startswith("al:ok:"):
+        await _approve_alerts(query)
         return
     if query.data == "vpn:yes":
         try:
@@ -335,9 +419,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         with session() as db:
-            mark_vpn(db, query.from_user.id, query.from_user.username)
+            person = mark_vpn(db, query.from_user.id, query.from_user.username)
+            text = _start_text(True, bool(person.alerts_enabled))
+            keyboard = _start_keyboard(True, bool(person.alerts_enabled))
         try:
-            await query.edit_message_text("Socrat is online.\nYou are on the VPN list.")
+            await query.edit_message_text(text, reply_markup=keyboard)
         except Exception:
             pass
         return
@@ -350,11 +436,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     actor = str(query.from_user.id)
     action_id = uuid.UUID(query.data.removeprefix("act:"))
     with session() as db:
-        if not is_owner(db, query.from_user.id):
-            await query.edit_message_text("This action is available to the owner only.")
-            return
         action = db.get(Action, action_id)
         if action is None:
+            return
+        person = ensure_user(db, query.from_user.id, query.from_user.username)
+        allowed = person.role == "owner" or (action.type == "alert.silence" and person.alerts_enabled)
+        if not allowed:
+            await query.edit_message_text("This action is available to the owner only.")
             return
         result = await apply_action(db, action, actor)
         text = _result_text(action, result)
@@ -516,11 +604,18 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
         raise HTTPException(status_code=400, detail="text or alert required")
     parse_mode = "HTML" if card is not None or body.parse_mode == "HTML" else body.parse_mode
 
-    def prepare() -> tuple[int | None, list[tuple[str, str, int]], list[uuid.UUID], str | None]:
+    def chats() -> list[int]:
+        if card is None:
+            return [body.chat_id]
         with session() as db:
-            stored = open_card(db, card.key, body.chat_id, card.firing) if card is not None else None
+            people = [user.telegram_id for user in alert_recipients(db)]
+        return people or [body.chat_id]
+
+    def prepare(chat_id: int) -> tuple[int | None, list[tuple[str, str, int]], list[uuid.UUID], str | None]:
+        with session() as db:
+            stored = open_card(db, card.key, chat_id, card.firing) if card is not None else None
             if card is not None and card.firing and not body.actions:
-                incoming = mute_actions(card, stored.generation if stored else 1)
+                incoming = mute_actions(card, stored.generation if stored else 1, chat_id)
             else:
                 incoming = []
                 for item in body.actions:
@@ -539,7 +634,7 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                     db,
                     type_=item["type"],
                     payload=dict(item.get("payload") or {}),
-                    chat_id=body.chat_id,
+                    chat_id=chat_id,
                     idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()),
                     refresh=card is not None,
                 )
@@ -550,17 +645,14 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                     buttons.append((item.get("label") or row.type, f"act:{row.id}", int(item.get("row") or 0)))
             return existing, buttons, action_ids, stored.key if stored is not None else None
 
-    lock = _card_locks.setdefault(card.key, asyncio.Lock()) if card is not None else None
-    if lock is not None:
-        await lock.acquire()
-    try:
-        existing, buttons, action_ids, card_key = await asyncio.to_thread(prepare)
+    async def deliver(chat_id: int) -> dict:
+        existing, buttons, action_ids, card_key = await asyncio.to_thread(prepare, chat_id)
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         markup = keyboard(buttons)
         async with httpx.AsyncClient(timeout=20) as client:
             if existing is not None:
                 edit = {
-                    "chat_id": body.chat_id,
+                    "chat_id": chat_id,
                     "message_id": existing,
                     "text": text,
                     "reply_markup": markup.to_dict() if markup else {"inline_keyboard": []},
@@ -577,7 +669,7 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                 message_id = existing
                 replayed = True
             else:
-                payload = {"chat_id": body.chat_id, "text": text}
+                payload = {"chat_id": chat_id, "text": text}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
                 if markup:
@@ -596,7 +688,7 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                     if row is not None:
                         row.message_id = message_id
                 if card_key is not None and card is not None:
-                    stored = db.get(TelegramCard, card_key)
+                    stored = db.get(TelegramCard, (card_key, chat_id))
                     if stored is not None:
                         if card.firing and stored.status == "resolved":
                             stored.generation += 1
@@ -604,10 +696,26 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                         stored.message_id = message_id
 
         await asyncio.to_thread(persist)
-        body_out = {"id": message_id, "chat_id": body.chat_id}
+        body_out = {"id": message_id, "chat_id": chat_id}
         if replayed:
             body_out["replayed"] = True
         return body_out
+
+    lock = _card_locks.setdefault(card.key, asyncio.Lock()) if card is not None else None
+    if lock is not None:
+        await lock.acquire()
+    try:
+        delivered: list[dict] = []
+        failure: HTTPException | None = None
+        for chat_id in await asyncio.to_thread(chats):
+            try:
+                delivered.append(await deliver(chat_id))
+            except HTTPException as exc:
+                failure = exc
+                print(f"alert card {chat_id} {exc.detail}", flush=True)
+        if not delivered:
+            raise failure or HTTPException(status_code=502, detail="not delivered")
+        return next((item for item in delivered if item["chat_id"] == body.chat_id), delivered[0])
     finally:
         if lock is not None:
             lock.release()

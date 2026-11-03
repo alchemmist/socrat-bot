@@ -160,13 +160,12 @@ def open_card(db: Session, key: str, chat_id: int, firing: bool) -> TelegramCard
     Status and message id are stored only after Telegram accepts the update.
     """
     del firing
-    row = db.get(TelegramCard, key)
+    row = db.get(TelegramCard, (key, chat_id))
     if row is None:
         row = TelegramCard(key=key, chat_id=chat_id, generation=1, status="firing")
         db.add(row)
         db.flush()
         return row
-    row.chat_id = chat_id
     return row
 
 
@@ -212,6 +211,21 @@ def consume_link(db: Session, telegram_id: int, code: str) -> str:
 
 def vpn_audience(db: Session) -> list[User]:
     return list(db.scalars(select(User).where(User.uses_vpn.is_(True))))
+
+
+def alert_recipients(db: Session) -> list[User]:
+    return list(db.scalars(select(User).where(User.alerts_enabled.is_(True)).order_by(User.telegram_id)))
+
+
+def owners(db: Session) -> list[User]:
+    return list(db.scalars(select(User).where(User.role == "owner").order_by(User.telegram_id)))
+
+
+def approve_alerts(db: Session, telegram_id: int, username: str | None = None) -> User:
+    user = ensure_user(db, telegram_id, username)
+    user.alerts_enabled = True
+    audit(db, str(telegram_id), "alerts.approve", {"role": user.role})
+    return user
 
 
 def format_vpn_clients(users: list[User]) -> str:

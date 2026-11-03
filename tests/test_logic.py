@@ -14,6 +14,7 @@ from socrat_bot.logic import (
     claim_due_broadcasts,
     consume_link,
     create_action,
+    approve_alerts,
     ensure_user,
     format_vpn_clients,
     issue_link_code,
@@ -132,8 +133,21 @@ def test_open_card_keeps_the_message_until_telegram_accepts():
         row.status = "resolved"
         db.flush()
         again = open_card(db, "Node/pod/ns/name", 1, True)
+        other = open_card(db, "Node/pod/ns/name", 2, True)
         assert again.message_id == 10
         assert again.status == "resolved"
+        assert other.message_id is None
+        assert other.chat_id == 2
+
+
+def test_approve_alerts_keeps_the_role():
+    with session() as db:
+        ensure_user(db, 891074228)
+        guest = ensure_user(db, 42)
+        approved = approve_alerts(db, 42, "ada")
+        assert guest.role == "user"
+        assert approved.alerts_enabled is True
+        assert approved.username == "ada"
 
 
 def test_mark_vpn_does_not_demote_the_owner():

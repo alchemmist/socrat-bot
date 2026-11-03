@@ -393,7 +393,7 @@ def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     )
 
 
-def mute_actions(card: Card, generation: int) -> list[dict]:
+def mute_actions(card: Card, generation: int, chat_id: int = 0) -> list[dict]:
     if not card.firing:
         return []
     actions = []
@@ -404,7 +404,7 @@ def mute_actions(card: Card, generation: int) -> list[dict]:
                 "label": label,
                 "row": 0,
                 "payload": {"matchers": card.matchers, "minutes": minutes, "card": render_card(card)},
-                "idempotency_key": f"{card.key}:g{generation}:{minutes}"[:128],
+                "idempotency_key": f"{card.key}:g{generation}:{minutes}:{chat_id}"[:128],
             }
         )
     return actions
