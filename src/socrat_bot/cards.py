@@ -404,7 +404,7 @@ def mute_actions(card: Card, generation: int, chat_id: int = 0) -> list[dict]:
                 "type": "alert.silence",
                 "label": label,
                 "row": 0,
-                "payload": {"matchers": card.matchers, "minutes": minutes, "card": render_card(card)},
+                "payload": {"matchers": card.matchers, "minutes": minutes, "card": render_card(card), "key": card.key},
                 "idempotency_key": f"{card.key}:g{generation}:{minutes}:{chat_id}"[:128],
             }
         )

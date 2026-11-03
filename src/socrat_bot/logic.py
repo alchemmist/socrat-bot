@@ -213,6 +213,15 @@ def vpn_audience(db: Session) -> list[User]:
     return list(db.scalars(select(User).where(User.uses_vpn.is_(True))))
 
 
+def card_messages(db: Session, key: str) -> list[tuple[int, int]]:
+    rows = db.scalars(
+        select(TelegramCard)
+        .where(TelegramCard.key == key, TelegramCard.message_id.is_not(None))
+        .order_by(TelegramCard.chat_id)
+    )
+    return [(row.chat_id, int(row.message_id)) for row in rows if row.message_id]
+
+
 def alert_recipients(db: Session) -> list[User]:
     return list(db.scalars(select(User).where(User.alerts_enabled.is_(True)).order_by(User.telegram_id)))
 

@@ -15,6 +15,7 @@ from socrat_bot.logic import (
     consume_link,
     create_action,
     approve_alerts,
+    card_messages,
     ensure_user,
     format_vpn_clients,
     issue_link_code,
@@ -138,6 +139,9 @@ def test_open_card_keeps_the_message_until_telegram_accepts():
         assert again.status == "resolved"
         assert other.message_id is None
         assert other.chat_id == 2
+        other.message_id = 11
+        db.flush()
+        assert card_messages(db, "Node/pod/ns/name") == [(1, 10), (2, 11)]
 
 
 def test_approve_alerts_keeps_the_role():

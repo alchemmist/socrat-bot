@@ -78,7 +78,7 @@ A non-alert card uses the same renderer:
 
 `/start` stores the Telegram user. The reply is `Socrat is online.` with `I use VPN` and `Subscribe to alerts` until each one is done. Pressing the VPN button sets `uses_vpn` and does not change an owner into a regular user. A normal user becomes role `vpn`. The broadcast audience is everyone with `uses_vpn`, including an owner who opted in. A panel link code is separate and does not by itself add the person to this list.
 
-`Subscribe to alerts` asks an owner to approve. After approval, `alerts_enabled` is set and that chat receives its own copy of each alert card. Mute still creates one Alertmanager silence. The owner is subscribed from the start.
+`Subscribe to alerts` asks an owner to approve. After approval, `alerts_enabled` is set and that chat receives its own copy of each alert card. Mute still creates one Alertmanager silence and updates every admin's copy of that card: the buttons go away and the message says how long it is muted. The owner is subscribed from the start.
 
 The owner lists those Telegram accounts with `/clients`. Each known username is shown as `@username`. Someone who only pressed `/start` is not included.
 

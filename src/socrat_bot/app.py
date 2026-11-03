@@ -19,6 +19,7 @@ from socrat_bot.logic import (
     apply_action,
     approve_alerts,
     broadcast_zone,
+    card_messages,
     claim_due_broadcasts,
     consume_link,
     create_action,
@@ -446,16 +447,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         result = await apply_action(db, action, actor)
         text = _result_text(action, result)
-        if action.message_id:
-            try:
-                await context.bot.edit_message_text(
-                    text,
-                    chat_id=action.chat_id,
-                    message_id=action.message_id,
-                    parse_mode="HTML" if action.payload.get("card") else None,
-                )
-            except Exception:
-                pass
+        html = bool((action.payload or {}).get("card"))
+        copies = [(action.chat_id, action.message_id)] if action.message_id else []
+        if action.type == "alert.silence" and result.get("status") == "silenced":
+            key = (action.payload or {}).get("key")
+            if key:
+                copies = card_messages(db, key) or copies
+    empty = InlineKeyboardMarkup([])
+    for chat_id, message_id in copies:
+        try:
+            await context.bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode="HTML" if html else None,
+                reply_markup=empty if action.type == "alert.silence" and result.get("status") == "silenced" else None,
+            )
+        except Exception:
+            pass
 
 
 async def _broadcast_loop() -> None:
