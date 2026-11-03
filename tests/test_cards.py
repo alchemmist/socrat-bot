@@ -64,7 +64,7 @@ def test_resolved_prefix_and_single_namespace_argo():
         }
     )
     text = render_card(card)
-    assert text.startswith("<b>Resolved</b>")
+    assert text.startswith("[Resolved] <b>KubePodCrashLooping</b>")
     assert "Argo CD" in text
     assert "/applications/argocd/socrat-bot" in text
 

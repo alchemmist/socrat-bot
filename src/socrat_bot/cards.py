@@ -354,9 +354,10 @@ def select_links(labels: dict[str, str], names: list[str] | None = None, *, limi
 
 def render_card(card: Card) -> str:
     lines: list[str] = []
+    title = f"<b>{_esc(card.title)}</b>"
     if card.status == "resolved":
-        lines.append("<b>Resolved</b>")
-    lines.append(f"<b>{_esc(card.title)}</b>")
+        title = "[Resolved] " + title
+    lines.append(title)
     if card.where:
         lines.append(f"<code>{_esc(card.where)}</code>")
     if card.summary:
