@@ -1,3 +1,4 @@
+# Internal contract for processes that integrate with Socrat Bot.
 openapi: 3.0.3
 info:
   title: Socrat Bot
