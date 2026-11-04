@@ -41,9 +41,13 @@ def test_partial_failed_copy_is_retried_and_guard_rejects_replacement():
             fail.clear();second=await app.add_card_link(payload,'test-internal');assert len(second['updated'])==2 and not second['pending']
             assert len(calls)==4 # cached same-URL success still executes idempotent edit
             newer=payload.model_copy(update={'revision':2,'url':'https://github.com/alchemmist/homelab/issues/9#issuecomment-456'})
-            await app.add_card_link(newer,'test-internal')
+            fail.update({1,2})
+            result=await app.add_card_link(newer,'test-internal');assert len(result['pending'])==2
+            edits=len(calls)
             try:await app.add_card_link(payload,'test-internal');assert False
             except app.HTTPException as e:assert e.status_code==409
+            assert len(calls)==edits
+            fail.clear();await app.add_card_link(newer,'test-internal')
             with session()as db:
                 row=db.get(TelegramCard,(key,1));assert row.text.count('>SPI</a>')==1
                 row.message_id=999
@@ -57,3 +61,31 @@ def test_latest_spi_target_replaces_old_anchor_keeps_footer():
     text=app.add_link('base\n\n<i>Muted for 15m</i>',old)
     revised=app.replace_spi_link(text,old,'SPI',new,'SPI')
     assert revised.count('>SPI</a>')==1 and new in revised and revised.endswith('<i>Muted for 15m</i>')
+
+
+def test_delayed_firing_after_resolved_never_replaces_episode_copy():
+    init_schema()
+    with session()as db:db.execute(delete(TelegramCard))
+    calls=[]
+    class Response:
+        def json(self):return {'ok':True,'result':{'message_id':10}}
+    class Client:
+        def __init__(self,**kw):pass
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        async def post(self,url,json):calls.append((url,json));return Response()
+    async def run():
+        with patch.object(app.httpx,'AsyncClient',Client),patch.object(app,'alert_recipients',return_value=[]),patch.dict(os.environ,{'INTERNAL_TOKEN':'test-internal','TELEGRAM_BOT_TOKEN':'test-telegram'}):
+            firing=app.OutMessage(chat_id=1,alert=alert('c'*64))
+            a=await app.post_message(firing,'test-internal')
+            resolved=app.OutMessage(chat_id=1,alert={**alert('c'*64),'status':'resolved'})
+            b=await app.post_message(resolved,'test-internal')
+            late=await app.post_message(firing,'test-internal')
+            assert a['id']==b['id']==late['id']==10
+            assert len([url for url,_ in calls if url.endswith('/sendMessage')])==1
+            with session()as db:
+                row=db.get(TelegramCard,(a['key'],1));assert row.status=='resolved' and row.generation==1
+            # Covers receipt callback present or lost: API key/message identity stayed immutable.
+            out=await app.add_card_link(app.CardLinkIn(key=a['key'],revision=1,url='https://github.com/alchemmist/homelab/issues/9',expected_copies=a['copies']),'test-internal')
+            assert len(out['updated'])==1 and not out['pending']
+    asyncio.run(run())

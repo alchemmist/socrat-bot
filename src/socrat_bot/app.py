@@ -90,10 +90,12 @@ class BroadcastIn(BaseModel):
 
 def _saved_spi(key: str) -> tuple[str, str]:
     with session() as db:
-        row = db.scalar(select(TelegramCard).where(TelegramCard.key == key, TelegramCard.spi_url.is_not(None)))
-        if row is None or not row.spi_url:
-            return "", ""
-        return row.spi_url, row.spi_label or "SPI"
+        rows=db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()
+        desired=max(rows,key=lambda r:r.desired_link_revision or 0,default=None)
+        if desired is not None and desired.desired_spi_url:
+            return desired.desired_spi_url,"SPI"
+        row=next((r for r in rows if r.spi_url),None)
+        return (row.spi_url,row.spi_label or "SPI")if row else ("","")
 
 
 def _saved_note(key: str) -> str:
@@ -792,6 +794,13 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
         await lock.acquire()
     try:
         if card is not None:
+            if body.alert and body.alert.get("spi_episode"):
+                def was_resolved():
+                    with session()as db:
+                        return db.scalar(select(TelegramCard).where(TelegramCard.key==card.key,TelegramCard.status=="resolved")) is not None
+                if await asyncio.to_thread(was_resolved):
+                    card.status="resolved"
+                    text=render_card(card)
             spi_url, spi_label = await asyncio.to_thread(_saved_spi, card.key)
             if spi_url:
                 text = add_link(text, spi_url, spi_label)
@@ -850,7 +859,7 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
     async with _card_locks.setdefault(key, asyncio.Lock()):
         def load():
             with session() as db:
-                return [(r.chat_id,r.message_id,r.text,r.spi_url,r.spi_label,r.link_revision)
+                return [(r.chat_id,r.message_id,r.text,r.spi_url,r.spi_label,r.link_revision,r.desired_link_revision,r.desired_spi_url)
                         for r in db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()]
         rows = await asyncio.to_thread(load)
         if not rows:
@@ -867,15 +876,25 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
                 expected.add((copy["chat_id"],copy["message_id"]))
             if not expected <= {(r[0],r[1]) for r in rows}:
                 raise HTTPException(status_code=409, detail="card identity changed")
+        if body.revision is None and any((r[6] or 0)>0 and r[7]!=body.url for r in rows):
+            raise HTTPException(status_code=409,detail="revision required for this card")
         if body.revision is not None:
-            if body.revision<1 or not body.expected_copies:
+            if body.revision<1 or body.label!="SPI" or not body.expected_copies:
                 raise HTTPException(status_code=400,detail="revision requires expected copies")
-            if any((r[5] or 0)>body.revision or ((r[5] or 0)==body.revision and r[3] not in (None,body.url))for r in rows):
+            if any(max(r[5] or 0,r[6] or 0)>body.revision or ((r[6] or 0)==body.revision and r[7] not in (None,body.url))for r in rows):
                 raise HTTPException(status_code=409,detail="stale link revision")
+            def accept_desired():
+                with session()as db:
+                    for chat_id,*_ in rows:
+                        row=db.get(TelegramCard,(key,chat_id))
+                        row.desired_link_revision=body.revision;row.desired_spi_url=body.url
+            # Commit the desired fence BEFORE any Telegram request; failed edits
+            # do not allow an older request to become the desired target.
+            await asyncio.to_thread(accept_desired)
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         updated,pending=[],[]
         async with httpx.AsyncClient(timeout=20) as client:
-            for chat_id,message_id,current,old_url,old_label,_revision in rows:
+            for chat_id,message_id,current,old_url,old_label,_revision,_desired,_desired_url in rows:
                 pair={"chat_id":chat_id,"message_id":message_id}
                 if not current or not message_id:
                     pending.append(pair);continue

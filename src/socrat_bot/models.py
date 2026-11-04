@@ -85,6 +85,8 @@ class TelegramCard(Base):
     spi_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     spi_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
     link_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    desired_link_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    desired_spi_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
