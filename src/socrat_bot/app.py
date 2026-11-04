@@ -20,6 +20,7 @@ from socrat_bot.cards import (
     select_links,
 )
 from socrat_bot.cards import replace_spi_link as replace_spi_link
+from socrat_bot.commands import COMMANDS, command_menu_loop, sync_owner_menu
 from socrat_bot.db import init_schema, session
 from socrat_bot.delivery import (
     annotate_card,
@@ -52,6 +53,7 @@ from socrat_bot.logic import (
     mailing_hours,
     mailing_slot,
     mark_vpn,
+    owner_ids,
     owners,
     vpn_audience,
 )
@@ -201,6 +203,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         person = ensure_user(db, user.id, user.username)
         uses_vpn = bool(person.uses_vpn)
         alerts = bool(person.alerts_enabled)
+        owner = person.role == "owner"
         log.info("telegram start")
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
@@ -212,6 +215,8 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     keyboard = _start_keyboard(uses_vpn, alerts)
     await update.message.reply_text(text, reply_markup=keyboard)
+    if owner and not await sync_owner_menu(context.bot, user.id):
+        log.info("telegram commands failed")
 
 
 def _date_keyboard(broadcast_id: uuid.UUID, now: datetime) -> InlineKeyboardMarkup:
@@ -697,23 +702,27 @@ async def lifespan(app: FastAPI):
     init_schema()
     start_rule_refresh()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    command_ticker = None
     if token:
         ptb = Application.builder().token(token).updater(None).build()
-        ptb.add_handler(CommandHandler("start", on_start))
-        ptb.add_handler(CommandHandler("clients", on_clients))
-        ptb.add_handler(CommandHandler("alerts", on_alerts))
-        ptb.add_handler(CommandHandler("unsubscribe", on_unsubscribe))
-        ptb.add_handler(CommandHandler("alertlevel", on_alertlevel))
-        ptb.add_handler(CommandHandler("mailing", on_mailing))
+        for command in COMMANDS:
+            ptb.add_handler(CommandHandler(command.name, globals()[command.handler]))
         ptb.add_handler(CallbackQueryHandler(on_callback))
         await ptb.initialize()
         await ptb.start()
         await _register_webhook()
+        menu_owners = owner_ids()
+        with session() as db:
+            menu_owners.update(person.telegram_id for person in owners(db))
+        command_ticker = asyncio.create_task(command_menu_loop(ptb.bot, menu_owners))
     ticker = asyncio.create_task(_broadcast_loop())
     escalation_ticker = asyncio.create_task(outbox_loop())
     yield
     ticker.cancel()
     escalation_ticker.cancel()
+    if command_ticker is not None:
+        command_ticker.cancel()
+        await asyncio.gather(command_ticker, return_exceptions=True)
     if ptb is not None:
         await ptb.stop()
         await ptb.shutdown()

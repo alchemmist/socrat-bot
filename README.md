@@ -263,3 +263,23 @@ starts each real `python -m` Uvicorn process with isolated temporary SQLite and 
 Telegram credentials, requests only health, verifies owned lifecycle/request JSON
 and absence of a query canary, then terminates the processes. It makes no Telegram
 or Kubernetes changes and does not print captured log bodies.
+
+### Telegram command autocomplete
+
+`src/socrat_bot/commands.py` is the canonical command registry: command name,
+English description, handler binding, and owner-only menu visibility. Bot startup
+registers handlers from that registry and publishes complete lists with Telegram
+`setMyCommands`; BotFather edits are no longer necessary and will be overwritten
+in managed scopes on the next startup.
+
+Default and all-private-chat menus contain `/start`, `/alerts`, `/unsubscribe`.
+Owner private-chat scopes add `/clients`, `/alertlevel`, `/mailing`. Configured
+owner IDs and persisted owner users are included; an owner's `/start` also refreshes
+that personal scope after bootstrap. Language-independent, English, and Russian
+scope entries use the same English UI descriptions. Other manually configured
+language/scope overrides are not managed. Menu visibility is not authorization;
+handlers still check their existing permissions.
+
+Transient Telegram menu failures do not block webhooks or delivery: a background
+startup task retries every 60 seconds until all managed scopes succeed. The task
+is cancelled on shutdown; failures are logged without exception text or tokens.

@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 
 SERVICE = 'socrat-bot'
-EVENTS = {'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
+EVENTS = {'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
 
 
 class JsonFormatter(logging.Formatter):
