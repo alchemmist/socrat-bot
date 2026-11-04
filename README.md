@@ -103,3 +103,27 @@ The bot then offers the next seven days and Now. After a day, it offers every ho
 ## socrat-sudo
 
 The `socrat-sudo` command sits beside `sudo`. It sends the arguments to the broker and invokes `sudo` with the same arguments only after confirmation. sudoers is not tightened yet: plain `sudo` is still available. The client adds Telegram confirmation and does not replace the privilege policy.
+
+### Logging scope
+
+The bot, sudo broker and x-ui updater emit bounded JSON operational events through
+`socrat-bot`: successful application startup/shutdown and HTTP completion with a
+static component (`bot`, `broker`, `updater`), numeric status and duration in ms.
+HTTP events deliberately omit URL/path/query, method, client address, headers,
+body and exception details. Failed requests still emit a status (500 if no
+response was started); failures are not swallowed. Existing reviewed bot events
+retain their specific event names and bounded numeric fields.
+
+The Python entrypoints disable Uvicorn's raw access log, replacing it with these
+owned request events. Uvicorn lifecycle/error output and other dependency logs
+are **not** converted to application JSON: collector envelopes may normalize
+those vendor lines, but that is distinct from source JSON. A plain vendor startup
+line is not evidence of an application logger configuration failure. This is not
+an all-lines JSON guarantee, nor a redaction guarantee for vendor exception logs.
+
+Deterministic local verification: run
+`python -m pytest tests/test_structured_logging.py -q`. The actual-entrypoints test
+starts each real `python -m` Uvicorn process with isolated temporary SQLite and no
+Telegram credentials, requests only health, verifies owned lifecycle/request JSON
+and absence of a query canary, then terminates the processes. It makes no Telegram
+or Kubernetes changes and does not print captured log bodies.

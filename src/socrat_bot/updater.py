@@ -1,3 +1,4 @@
+from socrat_bot.structured_logging import OperationalEvents
 import os
 import re
 import time
@@ -318,6 +319,7 @@ def _rollout(api_client, installed: str) -> dict:
 
 
 api = FastAPI()
+api.add_middleware(OperationalEvents, component="updater")
 
 
 @api.get("/healthz")
@@ -352,7 +354,7 @@ def main() -> None:
     import uvicorn
 
     port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run("socrat_bot.updater:api", host="0.0.0.0", port=port)
+    uvicorn.run("socrat_bot.updater:api", host="0.0.0.0", port=port, access_log=False)
 
 
 if __name__ == "__main__":

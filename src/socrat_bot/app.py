@@ -1,3 +1,4 @@
+from socrat_bot.structured_logging import OperationalEvents
 from .structured_logging import configure_logging
 
 log = configure_logging()
@@ -652,6 +653,7 @@ async def lifespan(app: FastAPI):
 
 
 api = FastAPI(lifespan=lifespan)
+api.add_middleware(OperationalEvents, component="bot")
 
 
 @api.get("/healthz")
