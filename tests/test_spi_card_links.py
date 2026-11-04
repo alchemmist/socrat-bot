@@ -33,13 +33,17 @@ def test_partial_failed_copy_is_retried_and_guard_rejects_replacement():
         async def post(self,url,json):
             calls.append(json)
             return Response({'ok':False,'description':'temporary failure'}if json['chat_id']in fail else {'ok':True})
-    payload=app.CardLinkIn(key=key,url='https://github.com/alchemmist/homelab/issues/9#issuecomment-123',expected_copies=[{'chat_id':1,'message_id':10},{'chat_id':2,'message_id':20}])
+    payload=app.CardLinkIn(key=key,revision=1,url='https://github.com/alchemmist/homelab/issues/9#issuecomment-123',expected_copies=[{'chat_id':1,'message_id':10},{'chat_id':2,'message_id':20}])
     async def run():
         with patch.object(app.httpx,'AsyncClient',Client), patch.dict(os.environ,{'INTERNAL_TOKEN':'test-internal','TELEGRAM_BOT_TOKEN':'test-telegram'}):
             first=await app.add_card_link(payload,'test-internal');assert len(first['updated'])==1 and len(first['pending'])==1
             with session()as db:assert db.get(TelegramCard,(key,2)).spi_url is None
             fail.clear();second=await app.add_card_link(payload,'test-internal');assert len(second['updated'])==2 and not second['pending']
             assert len(calls)==4 # cached same-URL success still executes idempotent edit
+            newer=payload.model_copy(update={'revision':2,'url':'https://github.com/alchemmist/homelab/issues/9#issuecomment-456'})
+            await app.add_card_link(newer,'test-internal')
+            try:await app.add_card_link(payload,'test-internal');assert False
+            except app.HTTPException as e:assert e.status_code==409
             with session()as db:
                 row=db.get(TelegramCard,(key,1));assert row.text.count('>SPI</a>')==1
                 row.message_id=999

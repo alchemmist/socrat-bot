@@ -483,7 +483,11 @@ components:
           description: Ключ карточки, если он уже известен.
         alert:
           $ref: '#/components/schemas/Alert'
-        expected_copies:
+        revision:
+        type: integer
+        minimum: 1
+        description: Monotonic desired-link revision; stale revisions return409. Requires expected_copies.
+      expected_copies:
           type: array
           maxItems: 1000
           items:

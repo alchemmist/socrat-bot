@@ -837,6 +837,7 @@ class CardLinkIn(BaseModel):
     key: str | None = None
     alert: dict | None = None
     expected_copies: list[dict] | None = None
+    revision: int | None = None
 
 
 @api.post("/v1/cards/links")
@@ -849,7 +850,7 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
     async with _card_locks.setdefault(key, asyncio.Lock()):
         def load():
             with session() as db:
-                return [(r.chat_id,r.message_id,r.text,r.spi_url,r.spi_label)
+                return [(r.chat_id,r.message_id,r.text,r.spi_url,r.spi_label,r.link_revision)
                         for r in db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()]
         rows = await asyncio.to_thread(load)
         if not rows:
@@ -866,10 +867,15 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
                 expected.add((copy["chat_id"],copy["message_id"]))
             if not expected <= {(r[0],r[1]) for r in rows}:
                 raise HTTPException(status_code=409, detail="card identity changed")
+        if body.revision is not None:
+            if body.revision<1 or not body.expected_copies:
+                raise HTTPException(status_code=400,detail="revision requires expected copies")
+            if any((r[5] or 0)>body.revision or ((r[5] or 0)==body.revision and r[3] not in (None,body.url))for r in rows):
+                raise HTTPException(status_code=409,detail="stale link revision")
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         updated,pending=[],[]
         async with httpx.AsyncClient(timeout=20) as client:
-            for chat_id,message_id,current,old_url,old_label in rows:
+            for chat_id,message_id,current,old_url,old_label,_revision in rows:
                 pair={"chat_id":chat_id,"message_id":message_id}
                 if not current or not message_id:
                     pending.append(pair);continue
@@ -888,6 +894,7 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
                         row=db.get(TelegramCard,(key,chat_id))
                         if row is not None and row.message_id==message_id:
                             row.spi_url=body.url;row.spi_label=body.label;row.text=revised
+                            if body.revision is not None:row.link_revision=body.revision
                 await asyncio.to_thread(save_applied)
                 updated.append(pair)
         return {"key":key,"updated":updated,"pending":pending}
