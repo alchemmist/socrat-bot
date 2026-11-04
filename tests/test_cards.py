@@ -146,3 +146,30 @@ def test_note_stays_above_the_mute_footer():
     assert again.count("same incident") == 1
     swapped = replace_note(again, "same incident", "false positive")
     assert "same incident" not in swapped and "false positive" in swapped
+
+
+def test_all_explore_links_require_login_and_preserve_queries():
+    import json
+    from urllib.parse import urlsplit, parse_qs
+    cases = [
+        ({"namespace": "lms", "deployment": "lms"}, 'k8s_pod_name=~"lms-.+"'),
+        ({"namespace": "lms", "pod": "lms-abc-123"}, 'k8s_pod_name="lms-abc-123"'),
+        ({"namespace": "lms", "job_name": "copy-123"}, 'k8s_pod_name=~"copy-123-.+"'),
+        ({"namespace": "monitoring", "pod": "node-exporter-123", "name": "example.service"}, 'service_name="example.service"'),
+    ]
+    for labels, expected in cases:
+        links = select_links(labels, ["logs"])
+        assert len(links) == 1
+        url = links[0].url
+        params = parse_qs(urlsplit(url).query)
+        assert urlsplit(url).path == "/explore"
+        assert url.endswith("&forceLogin=true")
+        assert params["forceLogin"] == ["true"]
+        pane = json.loads(params["panes"][0])["logs"]
+        assert isinstance(pane["queries"], list)
+        assert expected in pane["queries"][0]["expr"]
+        assert pane["datasource"] == "loki"
+    trace = select_links({"trace_id": "abc123"}, ["traces"])[0]
+    params = parse_qs(urlsplit(trace.url).query)
+    assert params["forceLogin"] == ["true"]
+    assert "abc123" in params["left"][0]

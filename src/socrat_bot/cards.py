@@ -254,7 +254,7 @@ def _explore(datasource: str, query: str, field_name: str) -> str:
         "range": {"from": "now-1h", "to": "now"},
     }
     encoded = quote(json.dumps(left, separators=(",", ":")), safe="")
-    return f"{GRAFANA_URL}/explore?orgId=1&left={encoded}"
+    return f"{GRAFANA_URL}/explore?orgId=1&left={encoded}&forceLogin=true"
 
 
 class AlertLink(LinkProvider):
@@ -331,7 +331,7 @@ def _loki_explore(expr: str, start: str = "now-1h") -> str:
         }
     }
     encoded = quote(json.dumps(panes, separators=(",", ":")), safe="")
-    return f"{GRAFANA_URL}/explore?schemaVersion=1&orgId=1&panes={encoded}"
+    return f"{GRAFANA_URL}/explore?schemaVersion=1&orgId=1&panes={encoded}&forceLogin=true"
 
 
 class LogsLink(LinkProvider):
