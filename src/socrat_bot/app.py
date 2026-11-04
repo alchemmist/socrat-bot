@@ -1,3 +1,7 @@
+from .structured_logging import configure_logging
+
+log = configure_logging()
+
 import asyncio
 import os
 import uuid
@@ -118,7 +122,7 @@ def schedule_action_event(event: dict) -> None:
             async with httpx.AsyncClient(timeout=5) as client:
                 await client.post(url, json=event, headers=headers)
         except Exception as exc:
-            print(f"action webhook {exc}", flush=True)
+            log.error("action webhook failed")
 
     try:
         asyncio.get_running_loop().create_task(send())
@@ -178,7 +182,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         person = ensure_user(db, user.id, user.username)
         uses_vpn = bool(person.uses_vpn)
         alerts = bool(person.alerts_enabled)
-        print(f"telegram_start id={user.id} role={person.role}", flush=True)
+        log.info("telegram start")
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
@@ -565,11 +569,11 @@ async def _broadcast_loop() -> None:
                         row.status = "sent"
                         row.sent = result["sent"]
                         row.failed = result["failed"]
-                print(f"broadcast {broadcast_id} {result.get('status')}", flush=True)
+                log.info("broadcast completed", extra={"sent": result["sent"], "failed": result["failed"]})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"broadcast loop {exc}", flush=True)
+            log.error("broadcast loop failed")
 
 
 def _result_text(action: Action, result: dict) -> str:
@@ -621,7 +625,7 @@ async def _register_webhook() -> None:
                 "allowed_updates": ["message", "callback_query"],
             },
         )
-    print(f"telegram webhook {response.status_code}", flush=True)
+    log.info("telegram webhook completed", extra={"status": response.status_code})
 
 
 @asynccontextmanager
@@ -674,7 +678,7 @@ async def _run_update(payload: dict) -> None:
         update = Update.de_json(payload, ptb.bot)
         await ptb.process_update(update)
     except Exception as exc:
-        print(f"telegram update {exc}", flush=True)
+        log.error("telegram update failed")
 
 
 @api.post("/v1/messages")
@@ -814,7 +818,7 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
                 delivered.append(await deliver(chat_id))
             except HTTPException as exc:
                 failure = exc
-                print(f"alert card {chat_id} {exc.detail}", flush=True)
+                log.error("alert card failed")
         if not delivered:
             raise failure or HTTPException(status_code=502, detail="not delivered")
         chosen = next((item for item in delivered if item["chat_id"] == body.chat_id), delivered[0])
@@ -1009,7 +1013,7 @@ async def add_card_note(body: CardNoteIn, x_internal_token: str | None = Header(
                     )
                     data = response.json()
                     if not data.get("ok") and "message is not modified" not in str(data):
-                        print(f"card note {chat_id} {data}", flush=True)
+                        log.error("card note failed")
                         continue
                 updated.append({"chat_id": chat_id, "message_id": message_id})
 
