@@ -111,7 +111,7 @@ The `socrat-sudo` command sits beside `sudo`. It sends the arguments to the brok
 mean higher authority; an incident starts at the largest configured level and
 Escalate advances exactly one tier toward the smallest. Keep configured levels
 stable while incidents are open. The owner starts with admin 10 / receive 20;
-migration 0008 gives all other existing users admin 20 / receive 20. Newly
+migration 0010 gives all other existing users admin 20 / receive 20. Newly
 approved users start at the largest (lowest-authority) configured tier.
 `alerts_enabled` remains the approval authority; there is no new role.
 
@@ -194,11 +194,36 @@ is also supported.
 Both bot and sudo broker call `init_schema`. They serialize PostgreSQL upgrades
 using the same session advisory lock on a dedicated migration connection, supplied
 to Alembic; the lock is acquired before version-table inspection. CLI Alembic uses
-the same lock. Migration 0009 adds durable recipient ownership/content state and
-backfills existing cards; 0007→0009 and downgrade/upgrade are supported.
+the same lock. Migration 0011 adds durable recipient ownership/content state and
+backfills existing cards; 0007→0011 (including upstream SPI migrations 0008/0009) and downgrade/upgrade are supported.
 
 Older binaries do not honor the new recipient leases or incident state and must
 not overlap with new bot workers. The current homelab component Deployment template
 uses `strategy: Recreate` and `replicaCount: 1`; normal GitOps rollout preserves
 that requirement without ad hoc scaling/self-heal overrides. Concurrent startup
 of the separate bot/broker Deployments is supported by migration ownership.
+
+
+### SPI episode and link revision integration
+
+`spi_episode` retains the upstream authoritative digest-based immutable card key.
+A terminal resolved episode never re-fires or replaces its message, even if a
+late firing webhook arrives; a distinct episode digest starts a distinct incident.
+Episode cards use the same approved audience rules (never a fallback `chat_id`).
+
+`POST /v1/cards/links` preserves `expected_copies` identity validation and monotonic
+`revision` semantics. The accepted `desired_link_revision`/`desired_spi_url` fence
+commits **before HTTP**, even when all Telegram edits fail. Stale revisions or a
+same-revision different URL receive 409 without an edit. `link_revision` and
+`spi_url` describe applied successful HTTP snapshots, not desired state. Each
+retry re-edits the copy, including same-URL cached successes; `updated` acknowledges
+only delivered applied desired revisions and `pending` must be retried even on
+HTTP 200. The shared dispatcher checks the SPI fence again immediately before
+HTTP, preserves newer accepted targets during in-flight older edits, and repairs
+through durable work. Notes, mute and ordinary alert updates render the latest
+desired SPI target rather than reintroducing an older applied anchor.
+
+Migration 0011 preserves populated upstream 0009 desired/applied fences, including
+historical applied revisions, and enqueues recovery for accepted-but-unapplied
+SPI links. CI runs the PostgreSQL concurrency/migration/SPI suite on a PostgreSQL
+17 service on every release before the unchanged image publication/deploy chain.

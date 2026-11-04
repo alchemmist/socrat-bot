@@ -4,10 +4,18 @@ import asyncio
 import html
 import time
 import uuid
+from dataclasses import replace
 
 from sqlalchemy import select
 
-from socrat_bot.cards import add_link, add_note, mute_actions, render_card, replace_note
+from socrat_bot.cards import (
+    add_link,
+    add_note,
+    mute_actions,
+    render_card,
+    replace_note,
+    replace_spi_link,
+)
 from socrat_bot.db import session
 from socrat_bot.escalation import (
     _deliver_work,
@@ -25,6 +33,7 @@ def submit_card(card, custom_actions=None):
     with session() as db:
         recipients = route(db, card.key, card.firing)
         incident = db.get(Incident, card.key)
+        card = replace(card, status=incident.status)
         jobs = []
         for chat_id in recipients:
             state = delivery_state(db, card.key, chat_id, incident.generation)
@@ -129,8 +138,19 @@ def annotate_card(
                 if "<i>" in state.text:
                     text += "\n\n" + state.text[state.text.rfind("<i>") :]
             if url:
+                applied = db.get(TelegramCard, (key, state.chat_id))
+                if (
+                    applied
+                    and applied.desired_link_revision > 0
+                    and applied.desired_spi_url != url
+                ):
+                    raise ValueError("revision required for this card")
+                if applied and applied.desired_link_revision == 0:
+                    applied.desired_spi_url = url
+                text = replace_spi_link(
+                    text, state.spi_url, state.spi_label, url, label
+                )
                 state.spi_url, state.spi_label = url, label
-                text = add_link(text, url, label)
             if note is not None:
                 text = replace_note(text, state.note, note)
                 state.note = note
@@ -142,11 +162,7 @@ def annotate_card(
             card = db.get(TelegramCard, (key, state.chat_id))
             if card and card.generation == incident.generation:
                 card.text = marker(text, incident)
-                card.spi_url, card.spi_label, card.note = (
-                    state.spi_url,
-                    state.spi_label,
-                    state.note,
-                )
+                card.note = state.note
         return [
             s.chat_id for s in states if chat_id is None or s.chat_id == chat_id
         ], jobs
@@ -199,3 +215,187 @@ def delivered_copies(key, recipients, jobs=None):
             ):
                 result.append({"chat_id": chat_id, "message_id": card.message_id})
         return result
+
+
+def publish_spi(key, url, label, revision, expected_copies):
+    """Accept an immutable desired SPI fence before HTTP; applied metadata stays honest."""
+    from fastapi import HTTPException
+
+    from socrat_bot.escalation import insert_once
+    from socrat_bot.logic import alert_levels
+
+    with session() as db:
+        rows = list(
+            db.scalars(
+                select(TelegramCard)
+                .where(TelegramCard.key == key)
+                .order_by(TelegramCard.chat_id)
+            )
+        )
+        if not rows:
+            raise HTTPException(404, "card not found")
+        insert_once(
+            db,
+            Incident,
+            {
+                "key": key,
+                "generation": max(r.generation for r in rows),
+                "level": alert_levels()[-1],
+                "status": "resolved"
+                if any(r.status == "resolved" for r in rows)
+                else "firing",
+                "history": [],
+            },
+        )
+        incident = db.scalar(
+            select(Incident).where(Incident.key == key).with_for_update()
+        )
+        states = {
+            r.chat_id: delivery_state(db, key, r.chat_id, r.generation) for r in rows
+        }
+        # A pending first send can materialize another TelegramCard while we wait
+        # for ownership rows. Lock all original intents before refreshing copies.
+        states.update(
+            {
+                state.chat_id: state
+                for state in db.scalars(
+                    select(CardDelivery)
+                    .where(CardDelivery.key == key)
+                    .order_by(CardDelivery.chat_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            }
+        )
+        rows = list(
+            db.scalars(
+                select(TelegramCard)
+                .where(TelegramCard.key == key)
+                .order_by(TelegramCard.chat_id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        if not any(r.text for r in rows):
+            raise HTTPException(409, "card text is not stored yet")
+        if expected_copies is not None:
+            if not expected_copies or len(expected_copies) > 1000:
+                raise HTTPException(400, "invalid expected copies")
+            expected = set()
+            for copy in expected_copies:
+                if (
+                    type(copy.get("chat_id")) is not int
+                    or type(copy.get("message_id")) is not int
+                ):
+                    raise HTTPException(400, "invalid expected copy")
+                expected.add((copy["chat_id"], copy["message_id"]))
+            if not expected <= {(r.chat_id, r.message_id) for r in rows}:
+                raise HTTPException(409, "card identity changed")
+        if revision is None and any(
+            r.desired_link_revision > 0 and r.desired_spi_url != url for r in rows
+        ):
+            raise HTTPException(409, "revision required for this card")
+        if revision is not None:
+            if revision < 1 or label != "SPI" or not expected_copies:
+                raise HTTPException(400, "revision requires expected copies")
+            if any(
+                max(r.link_revision, r.desired_link_revision) > revision
+                or (
+                    r.desired_link_revision == revision
+                    and r.desired_spi_url not in (None, url)
+                )
+                for r in rows
+            ):
+                raise HTTPException(409, "stale link revision")
+        jobs, pairs = [], []
+        for row in rows:
+            state = states[row.chat_id]
+            if state.generation != row.generation:
+                raise HTTPException(409, "card identity changed")
+            if revision is not None:
+                row.desired_link_revision, row.desired_spi_url = revision, url
+            elif row.desired_link_revision == 0:
+                row.desired_spi_url = (
+                    url  # legacy unversioned targets still publish before HTTP
+                )
+            text = state.text or row.text
+            if text:
+                text = replace_spi_link(
+                    text, state.spi_url, state.spi_label, url, label
+                )
+                text = replace_spi_link(text, row.spi_url, row.spi_label, url, label)
+            state.text, state.spi_url, state.spi_label = text, url, label
+            state.link_revision = (
+                revision
+                if revision is not None
+                else max(
+                    row.desired_link_revision, row.link_revision, state.link_revision
+                )
+            )
+            state.revision += 1
+            job = AlertOutbox(
+                payload={
+                    "key": key,
+                    "generation": state.generation,
+                    "chat_id": row.chat_id,
+                    "kind": "spi",
+                    "message_id": row.message_id,
+                    "revision": state.revision,
+                }
+            )
+            db.add(job)
+            db.flush()
+            jobs.append(job.id)
+            pairs.append({"chat_id": row.chat_id, "message_id": row.message_id})
+        # Original admitted recipients may still await their first main card. A
+        # key-wide SPI association must survive their later successful first send.
+        for state in db.scalars(
+            select(CardDelivery)
+            .where(
+                CardDelivery.key == key, CardDelivery.generation == incident.generation
+            )
+            .order_by(CardDelivery.chat_id)
+            .with_for_update()
+        ):
+            if state.chat_id in {row.chat_id for row in rows}:
+                continue
+            if revision is not None and state.link_revision > revision:
+                raise HTTPException(409, "stale link revision")
+            text = (
+                replace_spi_link(state.text, state.spi_url, state.spi_label, url, label)
+                if state.text
+                else None
+            )
+            state.spi_url, state.spi_label = url, label
+            if revision is not None:
+                state.link_revision = revision
+            enqueue_card(db, incident, state.chat_id, text=text)
+        return pairs, jobs
+
+
+def spi_acknowledgements(key, pairs, jobs, url, revision):
+    with session() as db:
+        requested = {
+            j.payload["chat_id"]: j.payload["revision"]
+            for j in db.scalars(select(AlertOutbox).where(AlertOutbox.id.in_(jobs)))
+        }
+        updated, pending = [], []
+        for pair in pairs:
+            row = db.get(TelegramCard, (key, pair["chat_id"]))
+            state = db.get(CardDelivery, (key, pair["chat_id"]))
+            applied = (
+                row
+                and row.message_id == pair["message_id"]
+                and row.spi_url == url
+                and state.spi_url == url
+                and row.desired_spi_url in (None, url)
+                and state.delivered_revision >= requested[pair["chat_id"]]
+            )
+            if revision is not None:
+                applied = (
+                    applied
+                    and row.link_revision == revision
+                    and row.desired_link_revision == revision
+                    and row.desired_spi_url == url
+                )
+            (updated if applied else pending).append(pair)
+        return {"key": key, "updated": updated, "pending": pending}

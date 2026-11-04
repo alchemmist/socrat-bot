@@ -19,11 +19,14 @@ from socrat_bot.cards import (
     build_alert,
     select_links,
 )
+from socrat_bot.cards import replace_spi_link as replace_spi_link
 from socrat_bot.db import init_schema, session
 from socrat_bot.delivery import (
     annotate_card,
     delivered_copies,
     dispatch_jobs,
+    publish_spi,
+    spi_acknowledgements,
     submit_card,
 )
 from socrat_bot.escalation import escalate, marker, outbox_loop
@@ -734,10 +737,11 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
         copies = await asyncio.to_thread(delivered_copies, card.key, recipients, jobs)
         if recipients and not copies:
             raise HTTPException(status_code=502, detail="delivery pending; durable retry retained")
+        episode_meta = {"episode": card.key.rsplit("/spi/", 1)[1], "immutable_key": True} if "/spi/" in card.key else {}
         if not copies:
-            return {"key": card.key, "copies": []}
+            return {"key": card.key, "copies": [], **episode_meta}
         chosen = next((c for c in copies if c["chat_id"] == body.chat_id), copies[0])
-        return {"key": card.key, "id": chosen["message_id"], "chat_id": chosen["chat_id"], "copies": copies}
+        return {"key": card.key, "id": chosen["message_id"], "chat_id": chosen["chat_id"], "copies": copies, **episode_meta}
     if not body.text:
         raise HTTPException(status_code=400, detail="text or alert required")
     buttons, action_ids, existing = [], [], None
@@ -785,22 +789,11 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
     if not key:
         raise HTTPException(status_code=400, detail="key or alert required")
 
-    try:
-        recipients, jobs = await asyncio.to_thread(annotate_card, key, url=body.url, label=body.label)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    pairs, jobs = await asyncio.to_thread(publish_spi, key, body.url, body.label, body.revision, body.expected_copies)
     await dispatch_jobs(jobs)
-    return {"key": key, "updated": await asyncio.to_thread(delivered_copies, key, recipients, jobs)}
+    return await asyncio.to_thread(spi_acknowledgements, key, pairs, jobs, body.url, body.revision)
 
 
-def replace_spi_link(text, old_url, old_label, url, label):
-    if old_url and old_url != url:
-        from html import escape
-        anchor='<a href="'+escape(old_url,quote=True)+'">'+escape(old_label or "SPI")+'</a>'
-        text=text.replace(" · "+anchor,"").replace(anchor+" · ","").replace(anchor,"")
-    return add_link(text,url,label)
 
 
 @api.get("/v1/cards/item")
@@ -827,7 +820,8 @@ def get_cards(status: str = "firing", episode: str | None = None, x_internal_tok
         if not re.fullmatch(r"[a-f0-9]{64}",episode):
             raise HTTPException(status_code=400,detail="invalid episode")
         cards=[c for c in cards if c["key"].endswith("/spi/"+episode)]
-        for c in cards:c.update(episode=episode,immutable_key=True)
+        for c in cards:
+            c.update(episode=episode, immutable_key=True)
     return {"cards":cards}
 
 

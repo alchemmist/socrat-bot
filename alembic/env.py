@@ -1,5 +1,6 @@
 import os
 import sys
+from importlib import import_module
 from logging.config import fileConfig
 from pathlib import Path
 
@@ -12,13 +13,11 @@ SRC = ROOT / "src"
 if SRC.is_dir() and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from socrat_bot.models import Base
-
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-target_metadata = Base.metadata
+target_metadata = import_module("socrat_bot.models").Base.metadata
 
 
 def database_url() -> str:

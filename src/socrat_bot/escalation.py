@@ -84,7 +84,16 @@ def delivery_state(db, key, chat_id, generation):
             "delivered_revision": 0,
             "buttons": [],
             "text": card.text if card else None,
-            "spi_url": card.spi_url if card else None,
+            "spi_url": (
+                (card.desired_spi_url or card.spi_url)
+                if card.desired_link_revision >= card.link_revision
+                else card.spi_url
+            )
+            if card
+            else None,
+            "link_revision": max(card.desired_link_revision, card.link_revision)
+            if card
+            else 0,
             "spi_label": card.spi_label if card else None,
             "note": card.note if card else None,
         },
@@ -122,6 +131,16 @@ def enqueue_card(db, incident, chat_id, text=None, source=None):
 
 def route(db: Session, key: str, firing: bool) -> list[int]:
     """Atomically create one incident and snapshot durable initial recipient intents."""
+    if (
+        "/spi/" in key
+        and db.scalar(
+            select(TelegramCard.chat_id)
+            .where(TelegramCard.key == key, TelegramCard.status == "resolved")
+            .limit(1)
+        )
+        is not None
+    ):
+        firing = False
     inserted = insert_once(
         db,
         Incident,
@@ -134,6 +153,8 @@ def route(db: Session, key: str, firing: bool) -> list[int]:
         },
     )
     incident = db.scalar(select(Incident).where(Incident.key == key).with_for_update())
+    if "/spi/" in key and incident.status == "resolved":
+        firing = False  # episode keys are immutable terminal identities
     fresh = inserted or (firing and incident.status == "resolved")
     if fresh and not inserted:
         incident.generation += 1
@@ -260,6 +281,7 @@ def escalate(
                 db, incident.key, template.chat_id, generation
             )
             state.text = source_state.text or template.text
+            state.link_revision = source_state.link_revision
             state.spi_url, state.spi_label, state.note = (
                 source_state.spi_url,
                 source_state.spi_label,
@@ -369,6 +391,12 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             return None
         p["_owner"] = str(owner)
         p["_revision"] = state.revision
+        p["_spi_url"], p["_spi_label"], p["_link_revision"], p["_note"] = (
+            state.spi_url,
+            state.spi_label,
+            state.link_revision,
+            state.note,
+        )
         row.available_at = now + timedelta(seconds=60)
         row.attempts += 1
 
@@ -400,14 +428,17 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
         user = db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
         if (
             not incident
-            or incident.generation != p["generation"]
+            or (incident.generation != p["generation"] and p["kind"] != "spi")
             or state.generation != p["generation"]
         ):
             discard()
             return None
         existing = (
-            card and state.message_generation == incident.generation and card.message_id
+            card and state.message_generation == p["generation"] and card.message_id
         )
+        if p["kind"] == "spi" and (not existing or card.message_id != p["message_id"]):
+            discard()
+            return None
         if incident.status != "firing" and (not existing or p["kind"] == "notice"):
             discard()
             return None
@@ -438,17 +469,56 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             )
             row.available_at = now + timedelta(seconds=1)
             return None
-        text = marker(state.text, incident)
+        # Rehydrate a desired fence accepted by an older binary/migration before any HTTP.
+        if card and (
+            card.desired_link_revision > state.link_revision
+            or (
+                card.desired_link_revision == state.link_revision
+                and card.desired_spi_url
+                and card.desired_spi_url != state.spi_url
+            )
+        ):
+            discard()
+            return None
+        text = (
+            marker(state.text, incident)
+            if incident.generation == p["generation"]
+            else state.text
+        )
+        if state.spi_url:
+            from socrat_bot.cards import replace_spi_link
+
+            text = replace_spi_link(
+                text,
+                card.spi_url if card else None,
+                card.spi_label if card else None,
+                state.spi_url,
+                state.spi_label or "SPI",
+            )
         if incident.status == "resolved" and not text.startswith("[Resolved] "):
             text = "[Resolved] " + text
         if (
-            existing
+            p["kind"] != "spi"
+            and existing
             and state.delivered_revision >= state.revision
             and card.text == text
             and card.status == incident.status
         ):
             discard()
             return None
+        if p["kind"] == "spi":
+            # Always confirm retry via idempotent edit; desired state is not delivery acknowledgement.
+            return (
+                row.id,
+                "editMessageText",
+                {
+                    "chat_id": p["chat_id"],
+                    "message_id": card.message_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                },
+                p,
+            )
         rows = []
         # Preserve the existing mute policy: a muted card has no buttons.
         if incident.status == "firing" and "<i>" not in text:
@@ -538,6 +608,38 @@ def renew_lease(p):
         )
 
 
+def authorize_http(work: Work) -> bool:
+    """Fence a superseded SPI snapshot again immediately before starting HTTP."""
+    id_, _method, _body, p = work
+    with session() as db:
+        state = db.scalar(
+            select(CardDelivery)
+            .where(CardDelivery.key == p["key"], CardDelivery.chat_id == p["chat_id"])
+            .with_for_update()
+        )
+        if state.lease_owner != uuid.UUID(p["_owner"]):
+            return False
+        card = db.get(TelegramCard, (p["key"], p["chat_id"]))
+        stale_state = state.link_revision > p.get("_link_revision", 0) or (
+            state.link_revision == p.get("_link_revision", 0)
+            and state.spi_url
+            and state.spi_url != p.get("_spi_url")
+        )
+        stale_card = card and (
+            card.desired_link_revision > p.get("_link_revision", 0)
+            or (
+                card.desired_link_revision == p.get("_link_revision", 0)
+                and card.desired_spi_url
+                and card.desired_spi_url != p.get("_spi_url")
+            )
+        )
+        if p["kind"] in {"card", "spi"} and (stale_state or stale_card):
+            db.get(AlertOutbox, id_).done = True
+            state.lease_owner = state.lease_until = None
+            return False
+        return True
+
+
 async def drain_one() -> bool:
     work = await asyncio.to_thread(prepare_work)
     return await _deliver_work(work) if work else False
@@ -555,7 +657,9 @@ async def _deliver_work(work: Work) -> bool:
     ticker = asyncio.create_task(heartbeat())
     definite_rejection = False
     try:
-        if not await asyncio.to_thread(renew_lease, p):
+        if not await asyncio.to_thread(renew_lease, p) or not await asyncio.to_thread(
+            authorize_http, work
+        ):
             return False
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
@@ -610,14 +714,13 @@ def finish_work(work: Work, data: dict) -> bool:
         row = db.get(AlertOutbox, id_)
         row.done = True
         state.lease_owner = state.lease_until = None
-        if p["kind"] != "card":
+        if p["kind"] not in {"card", "spi"}:
             return True
         incident = db.get(Incident, p["key"])
         message_id = body.get("message_id") or data["result"]["message_id"]
         if (
-            incident.generation != p["generation"]
-            or state.generation != p["generation"]
-        ):
+            incident.generation != p["generation"] and p["kind"] != "spi"
+        ) or state.generation != p["generation"]:
             retired = (
                 body["text"]
                 if body["text"].startswith("[Resolved] ")
@@ -640,19 +743,27 @@ def finish_work(work: Work, data: dict) -> bool:
         if not card:
             card = TelegramCard(key=p["key"], chat_id=p["chat_id"])
             db.add(card)
+            db.flush()  # server/Python defaults initialize the upstream SPI fences
+        if p["kind"] == "spi" and card.message_id != p["message_id"]:
+            return True
         card.generation, card.status, card.message_id = (
             state.generation,
-            incident.status,
+            incident.status if incident.generation == p["generation"] else card.status,
             message_id,
         )
-        card.text = marker(state.text, incident)
-        if incident.status == "resolved" and not card.text.startswith("[Resolved] "):
-            card.text = "[Resolved] " + card.text
+        # Applied SPI metadata describes the actual accepted HTTP snapshot, never newer desired state.
+        card.text = body["text"]
         card.spi_url, card.spi_label, card.note = (
-            state.spi_url,
-            state.spi_label,
-            state.note,
+            p["_spi_url"],
+            p["_spi_label"],
+            p["_note"],
         )
+        card.link_revision = p["_link_revision"]
+        if state.link_revision >= card.desired_link_revision:
+            card.desired_link_revision, card.desired_spi_url = (
+                state.link_revision,
+                state.spi_url,
+            )
         state.message_generation = p["generation"]
         state.delivered_revision = p["_revision"]
         if (
@@ -666,7 +777,8 @@ def finish_work(work: Work, data: dict) -> bool:
                         "key": p["key"],
                         "generation": state.generation,
                         "chat_id": p["chat_id"],
-                        "kind": "card",
+                        "kind": "spi" if p["kind"] == "spi" else "card",
+                        "message_id": message_id,
                     }
                 )
             )

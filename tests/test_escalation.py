@@ -950,7 +950,7 @@ def list_pending_for_chat(key, chat_id):
         ]
 
 
-def test_pg_simultaneous_bot_broker_schema_initialization(store, tmp_path):
+def test_pg_simultaneous_bot_broker_schema_initialization(store, tmp_path, monkeypatch):
     if store != "postgres":
         pytest.skip("PostgreSQL advisory migration ownership required")
     import subprocess
@@ -1030,7 +1030,7 @@ init_schema()
                 "INSERT INTO telegram_cards (key, chat_id, message_id, generation, status, text) VALUES ('upgrade-card',1,99,3,'firing','Existing')"
             )
         )
-    simultaneous_start()  # populated 0007→0009, two independent startup processes
+    simultaneous_start()  # populated 0007→0011, two independent startup processes
     with database.session() as db:
         assert [
             (u.admin_level, u.receive_level)
@@ -1042,6 +1042,59 @@ init_schema()
             3,
             "Existing",
         )
+    # Upstream 0009 may already be deployed with a newer accepted SPI fence whose
+    # Telegram edit failed. Upgrade must preserve applied vs desired and recover it.
+    subprocess.run(
+        command + ["downgrade", "0009_spi_desired_revision"],
+        env=env,
+        capture_output=True,
+        check=True,
+    )
+    old_url, new_url = "https://example.org/old", "https://example.org/new"
+    with database._engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE telegram_cards SET spi_url=:old, spi_label='SPI', link_revision=1, desired_link_revision=2, desired_spi_url=:new, text=:text WHERE key='upgrade-card'"
+            ),
+            {
+                "old": old_url,
+                "new": new_url,
+                "text": f'Existing\n<a href="{old_url}">SPI</a>',
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO telegram_cards (key,chat_id,message_id,generation,status,text,spi_url,spi_label,link_revision,desired_link_revision) VALUES ('historical-card',2,202,1,'firing','History',:url,'SPI',7,0)"
+            ),
+            {"url": old_url},
+        )
+    simultaneous_start()
+    with database.session() as db:
+        card = db.get(TelegramCard, ("upgrade-card", 1))
+        state = db.get(CardDelivery, ("upgrade-card", 1))
+        assert (card.link_revision, card.spi_url) == (1, old_url)
+        assert (card.desired_link_revision, card.desired_spi_url) == (2, new_url)
+        assert (state.link_revision, state.spi_url) == (2, new_url)
+        assert db.get(CardDelivery, ("historical-card", 2)).link_revision == 7
+        assert any(
+            row.payload["kind"] == "spi" for row in db.scalars(select(AlertOutbox))
+        )
+    calls = response_client(monkeypatch)
+    for _ in range(5):
+        asyncio.run(drain_one())
+    with database.session() as db:
+        card = db.get(TelegramCard, ("upgrade-card", 1))
+        assert card.link_revision == card.desired_link_revision == 2
+        assert card.spi_url == card.desired_spi_url == new_url
+        assert old_url not in card.text and card.text.count(">SPI</a>") == 1
+    assert calls and new_url in calls[0][1]["text"]
+    from socrat_bot.cards import Card
+    from socrat_bot.delivery import dispatch_jobs, submit_card
+
+    _people, jobs = submit_card(Card(key="historical-card", title="History update"))
+    asyncio.run(dispatch_jobs(jobs))
+    with database.session() as db:
+        assert db.get(TelegramCard, ("historical-card", 2)).link_revision == 7
     subprocess.run(
         command + ["downgrade", "0007_card_note"],
         env=env,
@@ -1241,7 +1294,9 @@ def test_mute_completion_cannot_annotate_refired_incident(store, monkeypatch):
     )
     context = SimpleNamespace(bot=SimpleNamespace(edit_message_text=forbidden_edit))
     with ThreadPoolExecutor(max_workers=1) as pool:
-        result = pool.submit(asyncio.run, app.on_callback(SimpleNamespace(callback_query=query), context))
+        result = pool.submit(
+            asyncio.run, app.on_callback(SimpleNamespace(callback_query=query), context)
+        )
         assert entered.wait(10)
         try:
             with database.session() as db:
@@ -1254,5 +1309,305 @@ def test_mute_completion_cannot_annotate_refired_incident(store, monkeypatch):
         incident = db.get(Incident, "disk")
         assert incident.generation == 2
         assert incident.level == 20
-        for state in db.scalars(select(CardDelivery).where(CardDelivery.generation == 2)):
+        for state in db.scalars(
+            select(CardDelivery).where(CardDelivery.generation == 2)
+        ):
             assert not state.text or "Muted" not in state.text
+
+
+def spi_pairs():
+    return [{"chat_id": i, "message_id": 100 + i} for i in (1, 2, 4)]
+
+
+def test_spi_desired_fence_before_http_rejects_prepared_old_snapshot(
+    store, monkeypatch
+):
+    from fastapi import HTTPException
+
+    from socrat_bot.delivery import publish_spi, spi_acknowledgements
+    from socrat_bot.escalation import _deliver_work, prepare_work
+
+    seed()
+    old_url, new_url = "https://example.org/spi#old", "https://example.org/spi#new"
+    pairs, old_jobs = publish_spi("disk", old_url, "SPI", 1, spi_pairs())
+    old_work = prepare_work(old_jobs[0])
+    pairs, new_jobs = publish_spi("disk", new_url, "SPI", 2, spi_pairs())
+    calls = response_client(monkeypatch)
+    assert not asyncio.run(_deliver_work(old_work))
+    assert calls == []
+    with database.session() as db:
+        for card in db.scalars(select(TelegramCard)):
+            assert card.desired_link_revision == 2 and card.desired_spi_url == new_url
+            assert card.link_revision == 0 and card.spi_url != new_url
+    with pytest.raises(HTTPException) as error:
+        publish_spi("disk", old_url, "SPI", 1, spi_pairs())
+    assert error.value.status_code == 409
+    for _ in range(20):
+        asyncio.run(drain_one())
+    assert not spi_acknowledgements("disk", pairs, old_jobs, old_url, 1)["updated"]
+    assert (
+        len(spi_acknowledgements("disk", pairs, new_jobs, new_url, 2)["updated"]) == 3
+    )
+    assert all(
+        new_url in body["text"] and body["text"].count(">SPI</a>") == 1
+        for _, body in calls
+    )
+
+
+def test_pg_spi_inflight_newer_failed_fence_keeps_ack_pending(store, monkeypatch):
+    if store != "postgres":
+        pytest.skip("Independent PostgreSQL sessions required")
+    from threading import Event
+
+    from socrat_bot.app import CardLinkIn, add_card_link
+    from socrat_bot.delivery import publish_spi
+
+    seed()
+    monkeypatch.setenv("INTERNAL_TOKEN", "test")
+    started, release = Event(), Event()
+    calls, reject_new = [], [True]
+    old_url, new_url = "https://example.org/spi#old", "https://example.org/spi#new"
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json):
+            calls.append(dict(json))
+            if old_url in json["text"] and json["chat_id"] == 1:
+                started.set()
+                assert release.wait(15)
+            return httpx.Response(
+                200, json={"ok": not (reject_new[0] and new_url in json["text"])}
+            )
+
+    monkeypatch.setattr("socrat_bot.escalation.httpx.AsyncClient", Client)
+    old = CardLinkIn(key="disk", url=old_url, revision=1, expected_copies=spi_pairs())
+    new = old.model_copy(update={"url": new_url, "revision": 2})
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(lambda: asyncio.run(add_card_link(old, "test")))
+        try:
+            assert started.wait(10)
+            with database.session() as db:
+                assert all(
+                    c.desired_link_revision == 1
+                    for c in db.scalars(select(TelegramCard))
+                )
+            publish_spi("disk", new_url, "SPI", 2, spi_pairs())
+        finally:
+            release.set()
+        response = future.result(timeout=30)
+    assert response["updated"] == [] and len(response["pending"]) == 3
+    with database.session() as db:
+        for card in db.scalars(select(TelegramCard)):
+            assert card.desired_link_revision == 2 and card.desired_spi_url == new_url
+            assert card.link_revision < 2 and card.spi_url != new_url
+    previous_calls = len(calls)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(add_card_link(old, "test"))
+    assert error.value.status_code == 409 and len(calls) == previous_calls
+    reject_new[0] = False
+    response = asyncio.run(add_card_link(new, "test"))
+    assert len(response["updated"]) == 3 and response["pending"] == []
+    with database.session() as db:
+        for card in db.scalars(select(TelegramCard)):
+            assert card.link_revision == card.desired_link_revision == 2
+            assert card.spi_url == card.desired_spi_url == new_url
+            assert card.text.count(">SPI</a>") == 1
+
+
+@pytest.mark.parametrize("writer", ["webhook", "note", "mute"])
+def test_pg_spi_fence_survives_concurrent_other_card_writers(
+    store, monkeypatch, writer
+):
+    if store != "postgres":
+        pytest.skip("Independent PostgreSQL sessions required")
+    from threading import Event
+
+    from socrat_bot.cards import Card
+    from socrat_bot.delivery import annotate_card, publish_spi, submit_card
+    from socrat_bot.escalation import _deliver_work, prepare_work
+
+    seed()
+    old_url, new_url = "https://example.org/spi#old", "https://example.org/spi#new"
+    _pairs, jobs = publish_spi("disk", old_url, "SPI", 1, spi_pairs())
+    work = prepare_work(jobs[0])
+    started, release = Event(), Event()
+    calls = response_client(
+        monkeypatch, http_barrier=started, http_release=release, block_chat=1
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(lambda: asyncio.run(_deliver_work(work)))
+        try:
+            assert started.wait(10)
+            publish_spi("disk", new_url, "SPI", 2, spi_pairs())
+            if writer == "webhook":
+                submit_card(Card(key="disk", title="NEW WEBHOOK"))
+                expected = "NEW WEBHOOK"
+            elif writer == "note":
+                annotate_card("disk", note="NEW NOTE")
+                expected = "NEW NOTE"
+            else:
+                annotate_card("disk", mute="<i>NEW MUTE</i>")
+                expected = "NEW MUTE"
+        finally:
+            release.set()
+        assert future.result(timeout=15)
+    for _ in range(30):
+        asyncio.run(drain_one())
+    with database.session() as db:
+        for card in db.scalars(select(TelegramCard)):
+            assert card.link_revision == card.desired_link_revision == 2
+            assert card.spi_url == card.desired_spi_url == new_url
+            assert expected in card.text and card.text.count(">SPI</a>") == 1
+    assert expected in [body for _, body in calls if body["chat_id"] == 1][-1]["text"]
+
+
+def test_spi_episode_without_approved_audience_never_falls_back(store, monkeypatch):
+    from socrat_bot.app import OutMessage, post_message
+
+    monkeypatch.setenv("INTERNAL_TOKEN", "test")
+    calls = response_client(monkeypatch)
+    result = asyncio.run(
+        post_message(
+            OutMessage(
+                chat_id=999,
+                alert={"spi_episode": "d" * 64, "labels": {"alertname": "NoAudience"}},
+            ),
+            "test",
+        )
+    )
+    assert (
+        result["copies"] == []
+        and result["immutable_key"]
+        and result["episode"] == "d" * 64
+    )
+    assert calls == []
+
+
+def test_legacy_unversioned_spi_can_replace_target_until_versioned_fence(
+    store, monkeypatch
+):
+    from fastapi import HTTPException
+
+    from socrat_bot.delivery import dispatch_jobs, publish_spi, spi_acknowledgements
+
+    seed()
+    calls = response_client(monkeypatch)
+    for suffix in ("first", "second"):
+        url = "https://example.org/" + suffix
+        pairs, jobs = publish_spi("disk", url, "SPI", None, None)
+        asyncio.run(dispatch_jobs(jobs))
+        result = spi_acknowledgements("disk", pairs, jobs, url, None)
+        assert len(result["updated"]) == 3 and not result["pending"]
+    assert all(body["text"].count(">SPI</a>") == 1 for _, body in calls)
+    pairs, jobs = publish_spi(
+        "disk", "https://example.org/versioned", "SPI", 1, spi_pairs()
+    )
+    asyncio.run(dispatch_jobs(jobs))
+    with pytest.raises(HTTPException) as error:
+        publish_spi("disk", "https://example.org/third", "SPI", None, None)
+    assert error.value.status_code == 409
+
+
+def test_spi_association_reaches_original_pending_initial_recipient(store, monkeypatch):
+    from socrat_bot.cards import Card
+    from socrat_bot.delivery import (
+        dispatch_jobs,
+        publish_spi,
+        spi_acknowledgements,
+        submit_card,
+    )
+
+    initial_users()
+    _people, jobs = submit_card(Card(key="initial-spi", title="Initial SPI"))
+    calls = response_client(monkeypatch)
+    asyncio.run(dispatch_jobs([jobs[0]]))
+    with database.session() as db:
+        assert db.get(TelegramCard, ("initial-spi", 1)).message_id == 1001
+        assert db.get(TelegramCard, ("initial-spi", 2)) is None
+    url = "https://example.org/initial-spi"
+    pairs, link_jobs = publish_spi(
+        "initial-spi", url, "SPI", 1, [{"chat_id": 1, "message_id": 1001}]
+    )
+    asyncio.run(dispatch_jobs(link_jobs))
+    assert (
+        len(spi_acknowledgements("initial-spi", pairs, link_jobs, url, 1)["updated"])
+        == 1
+    )
+    for _ in range(15):
+        asyncio.run(drain_one())
+    second_main = [
+        body
+        for method, body in calls
+        if method == "sendMessage" and body["chat_id"] == 2
+    ]
+    assert len(second_main) == 1 and url in second_main[0]["text"]
+    with database.session() as db:
+        card = db.get(TelegramCard, ("initial-spi", 2))
+        assert card.link_revision == card.desired_link_revision == 1
+        assert card.spi_url == card.desired_spi_url == url
+
+
+def test_pg_spi_acceptance_refreshes_copy_materialized_during_lock_wait(
+    store, monkeypatch
+):
+    if store != "postgres":
+        pytest.skip("Independent PostgreSQL sessions required")
+    from threading import Event
+
+    from socrat_bot import delivery
+    from socrat_bot.cards import Card
+    from socrat_bot.delivery import (
+        dispatch_jobs,
+        publish_spi,
+        spi_acknowledgements,
+        submit_card,
+    )
+    from socrat_bot.escalation import _deliver_work, prepare_work
+
+    initial_users()
+    _people, jobs = submit_card(Card(key="spi-materialize", title="Materialize"))
+    response_client(monkeypatch)
+    asyncio.run(dispatch_jobs([jobs[0]]))
+    second = prepare_work(jobs[1])
+    assert second and second[1] == "sendMessage"
+    waiting, release = Event(), Event()
+    original = delivery.delivery_state
+
+    def paused_state(db, key, chat, generation):
+        state = original(db, key, chat, generation)
+        if key == "spi-materialize" and chat == 1:
+            waiting.set()
+            assert release.wait(15)
+        return state
+
+    monkeypatch.setattr(delivery, "delivery_state", paused_state)
+    url = "https://example.org/materialized"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            publish_spi,
+            "spi-materialize",
+            url,
+            "SPI",
+            1,
+            [{"chat_id": 1, "message_id": 1001}],
+        )
+        try:
+            assert waiting.wait(10)
+            assert asyncio.run(_deliver_work(second))
+        finally:
+            release.set()
+        pairs, link_jobs = future.result(timeout=15)
+    assert {pair["chat_id"] for pair in pairs} == {1, 2}
+    asyncio.run(dispatch_jobs(link_jobs))
+    result = spi_acknowledgements("spi-materialize", pairs, link_jobs, url, 1)
+    assert len(result["updated"]) == 2 and result["pending"] == []

@@ -42,7 +42,8 @@ def upgrade():
     op.execute(
         "INSERT INTO incidents (key, generation, level, status, history) "
         "SELECT key, MAX(generation), 20, "
-        "CASE WHEN SUM(CASE WHEN status = 'firing' THEN 1 ELSE 0 END) > 0 "
+        "CASE WHEN key LIKE '%/spi/%' AND SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) > 0 THEN 'resolved' "
+        "WHEN SUM(CASE WHEN status = 'firing' THEN 1 ELSE 0 END) > 0 "
         "THEN 'firing' ELSE 'resolved' END, '[]' FROM telegram_cards GROUP BY key"
     )
 

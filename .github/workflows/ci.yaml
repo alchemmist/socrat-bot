@@ -12,6 +12,22 @@ jobs:
   test:
     name: Run pytest
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: socrat_test
+          POSTGRES_USER: socrat_test
+          POSTGRES_PASSWORD: socrat_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U socrat_test -d socrat_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://socrat_test:socrat_test@localhost:5432/socrat_test
     steps:
       - uses: actions/checkout@v7
 
@@ -22,8 +38,11 @@ jobs:
 
       - name: Install and run pytest
         run: |
-          pip install -e . pytest httpx
-          pytest
+          pip install -e '.[dev]' pytest httpx ruff
+          ruff check src/socrat_bot/escalation.py src/socrat_bot/delivery.py src/socrat_bot/db.py tests/test_escalation.py tests/conftest.py tests/test_migrations.py alembic/versions/0010_escalation.py alembic/versions/0011_delivery_ownership.py
+          ruff check --isolated --select E4,E7,E9,F src/socrat_bot/app.py src/socrat_bot/cards.py src/socrat_bot/logic.py src/socrat_bot/models.py alembic/env.py
+          python -m compileall -q src tests alembic
+          pytest -q
 
   publish-and-deploy:
     name: Publish Harbor image and deploy

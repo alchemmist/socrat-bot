@@ -4,7 +4,7 @@ os.environ['DATABASE_URL']='sqlite+pysqlite:///./test.db'
 from sqlalchemy import delete
 from socrat_bot import app
 from socrat_bot.db import init_schema,session
-from socrat_bot.models import TelegramCard
+from socrat_bot.models import TelegramCard, User
 from socrat_bot.cards import build_alert,render_card
 
 
@@ -65,7 +65,9 @@ def test_latest_spi_target_replaces_old_anchor_keeps_footer():
 
 def test_delayed_firing_after_resolved_never_replaces_episode_copy():
     init_schema()
-    with session()as db:db.execute(delete(TelegramCard))
+    with session()as db:
+        db.execute(delete(TelegramCard))
+        db.add(User(telegram_id=1,role="user",alerts_enabled=True,admin_level=20,receive_level=20))
     calls=[]
     class Response:
         def json(self):return {'ok':True,'result':{'message_id':10}}
@@ -75,7 +77,7 @@ def test_delayed_firing_after_resolved_never_replaces_episode_copy():
         async def __aexit__(self,*args):pass
         async def post(self,url,json):calls.append((url,json));return Response()
     async def run():
-        with patch.object(app.httpx,'AsyncClient',Client),patch.object(app,'alert_recipients',return_value=[]),patch.dict(os.environ,{'INTERNAL_TOKEN':'test-internal','TELEGRAM_BOT_TOKEN':'test-telegram'}):
+        with patch.object(app.httpx,'AsyncClient',Client),patch.dict(os.environ,{'INTERNAL_TOKEN':'test-internal','TELEGRAM_BOT_TOKEN':'test-telegram'}):
             firing=app.OutMessage(chat_id=1,alert=alert('c'*64))
             a=await app.post_message(firing,'test-internal')
             resolved=app.OutMessage(chat_id=1,alert={**alert('c'*64),'status':'resolved'})

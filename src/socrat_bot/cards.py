@@ -537,3 +537,11 @@ def render_escalation(text: str | None, level: int, history: list[dict]) -> str:
     trail = " → ".join(str(stage) for stage in stages)
     lines.insert(1, f"<b>Level {level}</b>" + (f" · Escalated: {trail}" if trail else ""))
     return "\n".join(lines)
+
+
+def replace_spi_link(text, old_url, old_label, url, label):
+    """Replace the applied/previous desired SPI anchor without duplicating it."""
+    if old_url and old_url != url:
+        anchor = f'<a href="{_esc(old_url)}">{_esc(old_label or "SPI")}</a>'
+        text = text.replace(" · " + anchor, "").replace(anchor + " · ", "").replace(anchor, "")
+    return add_link(text, url, label)
