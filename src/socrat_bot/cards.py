@@ -528,3 +528,12 @@ def mute_actions(card: Card, generation: int, chat_id: int = 0) -> list[dict]:
             }
         )
     return actions
+
+
+def render_escalation(text: str | None, level: int, history: list[dict]) -> str:
+    """Replace only the bot-owned stage line; preserve links, notes and mute footer."""
+    lines = [line for index, line in enumerate((text or "").split("\n")) if index == 0 or not line.startswith("<b>Level ")]
+    stages = ([history[0]["from"]] if history and "from" in history[0] else []) + [item["level"] for item in history]
+    trail = " → ".join(str(stage) for stage in stages)
+    lines.insert(1, f"<b>Level {level}</b>" + (f" · Escalated: {trail}" if trail else ""))
+    return "\n".join(lines)

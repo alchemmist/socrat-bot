@@ -9,7 +9,16 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from socrat_bot.models import Action, Audit, Broadcast, LinkCode, SudoRequest, TelegramCard, User, utcnow
+from socrat_bot.models import (
+    Action,
+    Audit,
+    Broadcast,
+    LinkCode,
+    SudoRequest,
+    TelegramCard,
+    User,
+    utcnow,
+)
 
 ACTION_TYPES = {
     "alert.silence",
@@ -41,11 +50,15 @@ def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> U
             role="owner" if promote else "user",
             uses_vpn=False,
             alerts_enabled=promote,
+            admin_level=alert_levels()[0] if promote else alert_levels()[-1],
+            receive_level=alert_levels()[-1],
         )
         db.add(user)
-    elif promote:
+    elif promote and user.role != "owner":
         user.role = "owner"
         user.alerts_enabled = True
+        user.admin_level = alert_levels()[0]
+        user.receive_level = max(user.receive_level, user.admin_level)
     if username is not None:
         user.username = username.lstrip("@") or None
     db.flush()
@@ -199,8 +212,7 @@ def consume_link(db: Session, telegram_id: int, code: str) -> str:
         return "invalid"
     user = db.scalar(select(User).where(User.telegram_id == telegram_id))
     if user is None:
-        user = User(telegram_id=telegram_id, role="vpn")
-        db.add(user)
+        user = ensure_user(db, telegram_id)
     if user.role != "owner":
         user.role = "vpn"
     user.panel_client_id = row.panel_client_id
@@ -225,20 +237,23 @@ def card_messages(db: Session, key: str) -> list[tuple[int, int]]:
 
 def audience(db: Session) -> dict:
     def person(user: User) -> dict:
-        return {"telegram_id": user.telegram_id, "username": user.username}
+        return {"telegram_id": user.telegram_id, "username": user.username, "admin_level": user.admin_level, "receive_level": user.receive_level}
 
     vpn = sorted(vpn_audience(db), key=lambda user: user.telegram_id)
     return {"vpn": [person(user) for user in vpn], "alerts": [person(user) for user in alert_recipients(db)]}
 
 
 
-def card_view(key: str, copies: list[TelegramCard]) -> dict:
+def card_view(key: str, copies: list[TelegramCard], incident=None) -> dict:
     statuses = {row.status for row in copies}
     spi = next((row for row in copies if row.spi_url), None)
     note = next((row.note for row in copies if row.note), None)
     return {
         "key": key,
-        "status": "firing" if "firing" in statuses else "resolved",
+        "generation": incident.generation if incident else max(row.generation for row in copies),
+        "level": incident.level if incident else None,
+        "escalation_history": incident.history if incident else [],
+        "status": incident.status if incident else "firing" if "firing" in statuses else "resolved",
         "text_stored": any(bool(row.text) for row in copies),
         "spi_url": spi.spi_url if spi else None,
         "spi_label": spi.spi_label if spi else None,
@@ -247,6 +262,7 @@ def card_view(key: str, copies: list[TelegramCard]) -> dict:
             {
                 "chat_id": row.chat_id,
                 "message_id": row.message_id,
+                "generation": row.generation,
                 "status": row.status,
                 "text_stored": bool(row.text),
             }
@@ -259,7 +275,8 @@ def get_card(db: Session, key: str) -> dict | None:
     rows = list(db.scalars(select(TelegramCard).where(TelegramCard.key == key).order_by(TelegramCard.chat_id)))
     if not rows:
         return None
-    return card_view(key, rows)
+    from socrat_bot.models import Incident
+    return card_view(key, rows, db.get(Incident, key))
 
 
 def list_cards(db: Session, status: str = "firing") -> list[dict]:
@@ -269,7 +286,8 @@ def list_cards(db: Session, status: str = "firing") -> list[dict]:
         grouped.setdefault(row.key, []).append(row)
     cards = []
     for key, copies in grouped.items():
-        view = card_view(key, copies)
+        from socrat_bot.models import Incident
+        view = card_view(key, copies, db.get(Incident, key))
         if status != "all" and view["status"] != status:
             continue
         cards.append(view)
@@ -406,3 +424,11 @@ def _sudo_decision(db: Session, action: Action, status: str) -> dict:
         return {"status": "expired", "request_id": str(row.id)}
     row.status = status
     return {"status": status, "request_id": str(row.id), "argv": row.argv, "node": row.node}
+
+
+def alert_levels() -> list[int]:
+    """Ascending positive unique tiers; lower numbers are higher authority."""
+    levels = [int(n.strip()) for n in os.environ.get("ALERT_LEVELS", "10,20").split(",")]
+    if not levels or any(n <= 0 for n in levels) or levels != sorted(set(levels)):
+        raise ValueError("ALERT_LEVELS must be sorted positive unique integers")
+    return levels

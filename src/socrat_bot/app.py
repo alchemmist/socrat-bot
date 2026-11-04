@@ -11,16 +11,29 @@ from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-from socrat_bot.cards import Card, Link, add_link, add_note, build_alert, mute_actions, render_card, replace_note, select_links
+from socrat_bot.cards import (
+    Card,
+    Link,
+    add_link,
+    add_note,
+    build_alert,
+    select_links,
+)
 from socrat_bot.db import init_schema, session
+from socrat_bot.delivery import (
+    annotate_card,
+    delivered_copies,
+    dispatch_jobs,
+    submit_card,
+)
+from socrat_bot.escalation import escalate, marker, outbox_loop
 from socrat_bot.grafana_rules import start_rule_refresh
 from socrat_bot.logic import (
-    alert_recipients,
-    audience,
-    get_card,
-    list_cards,
+    alert_levels,
     apply_action,
     approve_alerts,
+    audience,
+    begin_mailing,
     broadcast_zone,
     card_messages,
     claim_due_broadcasts,
@@ -29,22 +42,26 @@ from socrat_bot.logic import (
     deliver_broadcast,
     ensure_user,
     format_vpn_clients,
+    get_card,
     is_owner,
-    begin_mailing,
+    list_cards,
     mailing_dates,
     mailing_hours,
     mailing_slot,
     mark_vpn,
-    open_card,
     owners,
-    schedule_broadcast,
     vpn_audience,
 )
-from socrat_bot.models import Action, Broadcast, TelegramCard, User
+from socrat_bot.models import (
+    Action,
+    Broadcast,
+    Incident,
+    TelegramCard,
+    User,
+)
 
 ptb: Application | None = None
 _updates: set[asyncio.Task] = set()
-_card_locks: dict[str, asyncio.Lock] = {}
 
 
 class Href(BaseModel):
@@ -173,7 +190,6 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None or update.message is None:
         return
     arg = context.args[0] if context.args else ""
-    already = False
     with session() as db:
         person = ensure_user(db, user.id, user.username)
         uses_vpn = bool(person.uses_vpn)
@@ -449,6 +465,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     if query is None or query.data is None:
         return
+    if query.data.startswith("esc:"):
+        try:
+            _, digest, generation, level = query.data.split(":")
+            with session() as db:
+                result = escalate(db, query.from_user.id, query.message.chat_id, query.message.message_id, digest, int(generation), int(level))
+            await query.answer(result)
+        except (ValueError, AttributeError):
+            await query.answer("Invalid escalation")
+        return
+    if query.data.startswith("rl:"):
+        with session() as db:
+            person = ensure_user(db, query.from_user.id)
+            try:
+                level = int(query.data.split(":")[1])
+            except ValueError:
+                level = -1
+            allowed = query.message.chat_id == query.from_user.id and person.alerts_enabled and level in alert_levels() and level >= person.admin_level
+            if allowed:
+                person.receive_level = level
+                settings_text = f"Alerts: enabled\nAdmin level: {person.admin_level}\nReceive level: {person.receive_level}"
+                settings_rows = [[InlineKeyboardButton(f"Receive {n}", callback_data=f"rl:{n}") for n in alert_levels() if n >= person.admin_level]]
+        await query.answer(f"Receive level: {level}" if allowed else "Not allowed")
+        if allowed:
+            await query.edit_message_text(settings_text, reply_markup=InlineKeyboardMarkup(settings_rows))
+        return
     if await _on_mailing_callback(query, query.data):
         return
     if query.data == "al:yes":
@@ -479,6 +520,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:
         pass
     actor = str(query.from_user.id)
+    mute_generation = None
     action_id = uuid.UUID(query.data.removeprefix("act:"))
     with session() as db:
         action = db.get(Action, action_id)
@@ -489,6 +531,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not allowed:
             await query.edit_message_text("This action is available to the owner only.")
             return
+        if action.type == "alert.silence" and action.payload.get("key"):
+            incident = db.get(Incident, action.payload["key"])
+            copy = db.get(TelegramCard, (action.payload["key"], action.chat_id))
+            if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
+                return
+            mute_generation = incident.generation if incident else None
         result = await apply_action(db, action, actor)
         text = _result_text(action, result)
         html = bool((action.payload or {}).get("card"))
@@ -510,39 +558,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 note = _saved_note(key)
                 if note:
                     text = add_note(text, note)
+                incident = db.get(Incident, key)
+                if incident:
+                    text = marker(text, incident)
         else:
             key = ""
-    card_lock = _card_locks.setdefault(key, asyncio.Lock()) if key else None
-    if card_lock is not None:
-        await card_lock.acquire()
-    try:
-        if key:
-            latest_url,latest_label=await asyncio.to_thread(_saved_spi,key)
-            if latest_url:
-                text=replace_spi_link(text,spi_url,spi_label,latest_url,latest_label)
-        empty = InlineKeyboardMarkup([])
-        for chat_id, message_id in copies:
-            try:
-                await context.bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    parse_mode="HTML" if html else None,
-                    reply_markup=empty if action.type == "alert.silence" and result.get("status") == "silenced" else None,
-                )
-            except Exception:
-                pass
-        if key and text:
-            def remember_mute() -> None:
-                with session() as db:
-                    for chat_id, _message_id in copies:
-                        row = db.get(TelegramCard, (key, chat_id))
-                        if row is not None:
-                            row.text = text
-            await asyncio.to_thread(remember_mute)
-    finally:
-        if card_lock is not None:
-            card_lock.release()
+    if key and text:
+        footer = text[text.rfind("<i>"):] if "<i>" in text else "<i>Muted</i>"
+        try:
+            _recipients, jobs = await asyncio.to_thread(
+                annotate_card, key, mute=footer, expected_generation=mute_generation
+            )
+        except ValueError:
+            # A silence request may finish after this incident has resolved/refired.
+            # Never carry an old callback's footer/buttons into the new generation.
+            return
+        await dispatch_jobs(jobs)
+        return
+    for chat_id, message_id in copies:
+        try:
+            await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, parse_mode="HTML" if html else None)
+        except Exception:
+            pass
 
 
 async def _broadcast_loop() -> None:
@@ -627,6 +664,7 @@ async def _register_webhook() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ptb
+    alert_levels()
     init_schema()
     start_rule_refresh()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -634,14 +672,18 @@ async def lifespan(app: FastAPI):
         ptb = Application.builder().token(token).updater(None).build()
         ptb.add_handler(CommandHandler("start", on_start))
         ptb.add_handler(CommandHandler("clients", on_clients))
+        ptb.add_handler(CommandHandler("alerts", on_alerts))
+        ptb.add_handler(CommandHandler("alertlevel", on_alertlevel))
         ptb.add_handler(CommandHandler("mailing", on_mailing))
         ptb.add_handler(CallbackQueryHandler(on_callback))
         await ptb.initialize()
         await ptb.start()
         await _register_webhook()
     ticker = asyncio.create_task(_broadcast_loop())
+    escalation_ticker = asyncio.create_task(outbox_loop())
     yield
     ticker.cancel()
+    escalation_ticker.cancel()
     if ptb is not None:
         await ptb.stop()
         await ptb.shutdown()
@@ -686,158 +728,45 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
         card = card_from_request(body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    text = render_card(card) if card is not None else body.text
-    if not text:
+    if card is not None:
+        recipients, jobs = await asyncio.to_thread(submit_card, card, body.actions)
+        await dispatch_jobs(jobs)
+        copies = await asyncio.to_thread(delivered_copies, card.key, recipients, jobs)
+        if recipients and not copies:
+            raise HTTPException(status_code=502, detail="delivery pending; durable retry retained")
+        if not copies:
+            return {"key": card.key, "copies": []}
+        chosen = next((c for c in copies if c["chat_id"] == body.chat_id), copies[0])
+        return {"key": card.key, "id": chosen["message_id"], "chat_id": chosen["chat_id"], "copies": copies}
+    if not body.text:
         raise HTTPException(status_code=400, detail="text or alert required")
-    parse_mode = "HTML" if card is not None or body.parse_mode == "HTML" else body.parse_mode
-
-    def chats() -> list[int]:
-        if card is None:
-            return [body.chat_id]
-        with session() as db:
-            people = [user.telegram_id for user in alert_recipients(db)]
-        return people or [body.chat_id]
-
-    def prepare(chat_id: int) -> tuple[int | None, list[tuple[str, str, int]], list[uuid.UUID], str | None]:
-        with session() as db:
-            stored = open_card(db, card.key, chat_id, card.firing) if card is not None else None
-            if card is not None and card.firing and not body.actions:
-                incoming = mute_actions(card, stored.generation if stored else 1, chat_id)
-            else:
-                incoming = []
-                for item in body.actions:
-                    copied = dict(item)
-                    if card is not None and copied.get("type") == "alert.silence":
-                        payload = dict(copied.get("payload") or {})
-                        payload.setdefault("card", text)
-                        copied["payload"] = payload
-                    incoming.append(copied)
-            buttons: list[tuple[str, str, int]] = []
-            action_ids: list[uuid.UUID] = []
-            fresh = stored is not None and card is not None and card.firing and stored.status == "resolved"
-            existing = None if fresh else stored.message_id if stored is not None and stored.message_id else None
-            for item in incoming:
-                row = create_action(
-                    db,
-                    type_=item["type"],
-                    payload=dict(item.get("payload") or {}),
-                    chat_id=chat_id,
-                    idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()),
-                    refresh=card is not None,
-                )
-                action_ids.append(row.id)
-                if existing is None and row.message_id:
-                    existing = row.message_id
-                if card is None or card.firing:
-                    buttons.append((item.get("label") or row.type, f"act:{row.id}", int(item.get("row") or 0)))
-            return existing, buttons, action_ids, stored.key if stored is not None else None
-
-    async def deliver(chat_id: int) -> dict:
-        existing, buttons, action_ids, card_key = await asyncio.to_thread(prepare, chat_id)
-        token = os.environ["TELEGRAM_BOT_TOKEN"]
-        markup = keyboard(buttons)
-        async with httpx.AsyncClient(timeout=20) as client:
-            if existing is not None:
-                edit = {
-                    "chat_id": chat_id,
-                    "message_id": existing,
-                    "text": text,
-                    "reply_markup": markup.to_dict() if markup else {"inline_keyboard": []},
-                }
-                if parse_mode:
-                    edit["parse_mode"] = parse_mode
-                response = await client.post(
-                    f"https://api.telegram.org/bot{token}/editMessageText",
-                    json=edit,
-                )
-                data = response.json()
-                if not data.get("ok") and "message is not modified" not in str(data):
-                    raise HTTPException(status_code=502, detail=data)
-                message_id = existing
-                replayed = True
-            else:
-                payload = {"chat_id": chat_id, "text": text}
-                if parse_mode:
-                    payload["parse_mode"] = parse_mode
-                if markup:
-                    payload["reply_markup"] = markup.to_dict()
-                response = await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
-                data = response.json()
-                if not data.get("ok"):
-                    raise HTTPException(status_code=502, detail=data)
-                message_id = data["result"]["message_id"]
-                replayed = False
-
-        def persist() -> None:
-            with session() as db:
-                for action_id in action_ids:
-                    row = db.get(Action, action_id)
-                    if row is not None:
-                        row.message_id = message_id
-                if card_key is not None and card is not None:
-                    stored = db.get(TelegramCard, (card_key, chat_id))
-                    if stored is not None:
-                        if card.firing and stored.status == "resolved":
-                            stored.generation += 1
-                        stored.status = "firing" if card.firing else "resolved"
-                        stored.message_id = message_id
-                        stored.text = text
-
-        await asyncio.to_thread(persist)
-        body_out = {"id": message_id, "chat_id": chat_id}
-        if replayed:
-            body_out["replayed"] = True
-        return body_out
-
-    lock = _card_locks.setdefault(card.key, asyncio.Lock()) if card is not None else None
-    if lock is not None:
-        await lock.acquire()
-    try:
-        if card is not None:
-            if body.alert and body.alert.get("spi_episode"):
-                def was_resolved():
-                    with session()as db:
-                        return db.scalar(select(TelegramCard).where(TelegramCard.key==card.key,TelegramCard.status=="resolved")) is not None
-                if await asyncio.to_thread(was_resolved):
-                    card.status="resolved"
-                    text=render_card(card)
-            spi_url, spi_label = await asyncio.to_thread(_saved_spi, card.key)
-            if spi_url:
-                text = add_link(text, spi_url, spi_label)
-            note = await asyncio.to_thread(_saved_note, card.key)
-            if note:
-                text = add_note(text, note)
-        delivered: list[dict] = []
-        failure: HTTPException | None = None
-        for chat_id in await asyncio.to_thread(chats):
-            try:
-                delivered.append(await deliver(chat_id))
-            except HTTPException as exc:
-                failure = exc
-                print(f"alert card {chat_id} {exc.detail}", flush=True)
-        if not delivered:
-            raise failure or HTTPException(status_code=502, detail="not delivered")
-        chosen = next((item for item in delivered if item["chat_id"] == body.chat_id), delivered[0])
-        result = {
-            "id": chosen["id"],
-            "chat_id": chosen["chat_id"],
-            "copies": [
-                {"chat_id": item["chat_id"], "message_id": item["id"], **({"replayed": True} if item.get("replayed") else {})}
-                for item in delivered
-            ],
-        }
-        if chosen.get("replayed"):
-            result["replayed"] = True
-        if card is not None:
-            result["key"] = card.key
-            if body.alert and body.alert.get("spi_episode"):
-                result["episode"] = body.alert["spi_episode"]
-                result["immutable_key"] = True
-        return result
-    finally:
-        if lock is not None:
-            lock.release()
-
+    buttons, action_ids, existing = [], [], None
+    with session() as db:
+        for item in body.actions:
+            action = create_action(db, type_=item["type"], payload=dict(item.get("payload") or {}), chat_id=body.chat_id,
+                idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()))
+            action_ids.append(action.id)
+            existing = existing or action.message_id
+            buttons.append((item.get("label") or action.type, f"act:{action.id}", int(item.get("row") or 0)))
+    payload = {"chat_id": body.chat_id, "text": body.text}
+    if body.parse_mode:
+        payload["parse_mode"] = body.parse_mode
+    markup = keyboard(buttons)
+    if markup:
+        payload["reply_markup"] = markup.to_dict()
+    if existing:
+        payload["message_id"] = existing
+    method = "editMessageText" if existing else "sendMessage"
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{method}", json=payload)
+        data = response.json()
+    if not data.get("ok") and "message is not modified" not in str(data):
+        raise HTTPException(status_code=502, detail="Telegram delivery rejected")
+    message_id = existing or data["result"]["message_id"]
+    with session() as db:
+        for id_ in action_ids:
+            db.get(Action, id_).message_id = message_id
+    return {"id": message_id, "chat_id": body.chat_id, "copies": [{"chat_id": body.chat_id, "message_id": message_id}], **({"replayed": True} if existing else {})}
 
 
 class CardLinkIn(BaseModel):
@@ -855,68 +784,15 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
     key = body.key or (build_alert(body.alert).key if body.alert else None)
     if not key:
         raise HTTPException(status_code=400, detail="key or alert required")
-    # Shared with message/note updates. Desired database state is NOT Telegram ack.
-    async with _card_locks.setdefault(key, asyncio.Lock()):
-        def load():
-            with session() as db:
-                return [(r.chat_id,r.message_id,r.text,r.spi_url,r.spi_label,r.link_revision,r.desired_link_revision,r.desired_spi_url)
-                        for r in db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()]
-        rows = await asyncio.to_thread(load)
-        if not rows:
-            raise HTTPException(status_code=404, detail="card not found")
-        if not any(r[2] for r in rows):
-            raise HTTPException(status_code=409, detail="card text is not stored yet")
-        if body.expected_copies is not None:
-            if not body.expected_copies or len(body.expected_copies)>1000:
-                raise HTTPException(status_code=400, detail="invalid expected copies")
-            expected=set()
-            for copy in body.expected_copies:
-                if type(copy.get("chat_id")) is not int or type(copy.get("message_id")) is not int:
-                    raise HTTPException(status_code=400, detail="invalid expected copy")
-                expected.add((copy["chat_id"],copy["message_id"]))
-            if not expected <= {(r[0],r[1]) for r in rows}:
-                raise HTTPException(status_code=409, detail="card identity changed")
-        if body.revision is None and any((r[6] or 0)>0 and r[7]!=body.url for r in rows):
-            raise HTTPException(status_code=409,detail="revision required for this card")
-        if body.revision is not None:
-            if body.revision<1 or body.label!="SPI" or not body.expected_copies:
-                raise HTTPException(status_code=400,detail="revision requires expected copies")
-            if any(max(r[5] or 0,r[6] or 0)>body.revision or ((r[6] or 0)==body.revision and r[7] not in (None,body.url))for r in rows):
-                raise HTTPException(status_code=409,detail="stale link revision")
-            def accept_desired():
-                with session()as db:
-                    for chat_id,*_ in rows:
-                        row=db.get(TelegramCard,(key,chat_id))
-                        row.desired_link_revision=body.revision;row.desired_spi_url=body.url
-            # Commit the desired fence BEFORE any Telegram request; failed edits
-            # do not allow an older request to become the desired target.
-            await asyncio.to_thread(accept_desired)
-        token = os.environ["TELEGRAM_BOT_TOKEN"]
-        updated,pending=[],[]
-        async with httpx.AsyncClient(timeout=20) as client:
-            for chat_id,message_id,current,old_url,old_label,_revision,_desired,_desired_url in rows:
-                pair={"chat_id":chat_id,"message_id":message_id}
-                if not current or not message_id:
-                    pending.append(pair);continue
-                revised = replace_spi_link(current, old_url, old_label, body.url, body.label)
-                try:
-                    # Always re-edit: cached desired text must never fake delivery.
-                    response=await client.post(f"https://api.telegram.org/bot{token}/editMessageText",
-                        json={**pair,"text":revised,"parse_mode":"HTML"})
-                    data=response.json()
-                    if not data.get("ok") and "message is not modified" not in str(data.get("description","")):
-                        pending.append(pair);continue
-                except (httpx.HTTPError,ValueError):
-                    pending.append(pair);continue
-                def save_applied():
-                    with session() as db:
-                        row=db.get(TelegramCard,(key,chat_id))
-                        if row is not None and row.message_id==message_id:
-                            row.spi_url=body.url;row.spi_label=body.label;row.text=revised
-                            if body.revision is not None:row.link_revision=body.revision
-                await asyncio.to_thread(save_applied)
-                updated.append(pair)
-        return {"key":key,"updated":updated,"pending":pending}
+
+    try:
+        recipients, jobs = await asyncio.to_thread(annotate_card, key, url=body.url, label=body.label)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await dispatch_jobs(jobs)
+    return {"key": key, "updated": await asyncio.to_thread(delivered_copies, key, recipients, jobs)}
 
 
 def replace_spi_link(text, old_url, old_label, url, label):
@@ -983,48 +859,14 @@ async def add_card_note(body: CardNoteIn, x_internal_token: str | None = Header(
     if len(cleaned) > 240:
         raise HTTPException(status_code=400, detail="note is too long")
 
-    async with _card_locks.setdefault(key, asyncio.Lock()):
-        def load() -> tuple[str | None, list[tuple[int, int | None, str | None]]]:
-            with session() as db:
-                rows = db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()
-                previous = next((row.note for row in rows if row.note), None)
-                return previous, [(row.chat_id, row.message_id, row.text) for row in rows]
-
-        previous, rows = await asyncio.to_thread(load)
-        if not rows:
-            raise HTTPException(status_code=404, detail="card not found")
-        if not any(item[2] for item in rows):
-            raise HTTPException(status_code=409, detail="card text is not stored yet")
-        token = os.environ["TELEGRAM_BOT_TOKEN"]
-        updated: list[dict] = []
-        async with httpx.AsyncClient(timeout=20) as client:
-            for chat_id, message_id, current in rows:
-                if not current or not message_id:
-                    continue
-                revised = replace_note(current, previous, cleaned)
-                if revised != current:
-                    response = await client.post(
-                        f"https://api.telegram.org/bot{token}/editMessageText",
-                        json={"chat_id": chat_id, "message_id": message_id, "text": revised, "parse_mode": "HTML"},
-                    )
-                    data = response.json()
-                    if not data.get("ok") and "message is not modified" not in str(data):
-                        print(f"card note {chat_id} {data}", flush=True)
-                        continue
-                updated.append({"chat_id": chat_id, "message_id": message_id})
-
-        def save() -> None:
-            with session() as db:
-                for chat_id, _message_id, current in rows:
-                    row = db.get(TelegramCard, (key, chat_id))
-                    if row is None:
-                        continue
-                    row.note = cleaned
-                    if row.text:
-                        row.text = replace_note(row.text, previous, cleaned)
-
-        await asyncio.to_thread(save)
-        return {"key": key, "updated": updated}
+    try:
+        recipients, jobs = await asyncio.to_thread(annotate_card, key, note=cleaned)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await dispatch_jobs(jobs)
+    return {"key": key, "updated": await asyncio.to_thread(delivered_copies, key, recipients, jobs)}
 
 
 @api.patch("/v1/messages/{message_id}")
@@ -1035,6 +877,19 @@ async def patch_message(
     x_internal_token: str | None = Header(default=None),
 ):
     require_internal(x_internal_token)
+    with session() as db:
+        stored = db.scalar(select(TelegramCard).where(TelegramCard.chat_id == chat_id, TelegramCard.message_id == message_id))
+        target = (stored.key, stored.generation) if stored else None
+    if target:
+        try:
+            _recipients, jobs = await asyncio.to_thread(annotate_card, target[0], replacement=body.text, chat_id=chat_id, expected_generation=target[1])
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await dispatch_jobs(jobs)
+        completed = await asyncio.to_thread(delivered_copies, target[0], [chat_id], jobs)
+        if not completed:
+            raise HTTPException(status_code=502, detail="delivery pending; durable retry retained")
+        return {"id": message_id}
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(
@@ -1104,3 +959,59 @@ def get_action(action_id: uuid.UUID, x_internal_token: str | None = Header(defau
         if row is None:
             raise HTTPException(status_code=404)
         return {"id": str(row.id), "status": row.status, "result": row.result}
+
+
+async def on_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.id != update.effective_user.id:
+        await update.effective_message.reply_text("Alert settings are available in private chat only.")
+        return
+    with session() as db:
+        person = ensure_user(db, update.effective_user.id, update.effective_user.username)
+        args = context.args or []
+        result = ""
+        if args and args[0] in {"off", "disable"}:
+            person.alerts_enabled = False
+        elif args and args[0] in {"on", "enable"}:
+            if person.role == "owner":
+                person.alerts_enabled = True
+            elif not person.alerts_enabled:
+                result = "Approval required. Use Subscribe to alerts in /start.\n"
+        elif len(args) == 2 and args[0] == "level":
+            try:
+                level = int(args[1])
+            except ValueError:
+                level = -1
+            if person.alerts_enabled and level in alert_levels() and level >= person.admin_level:
+                person.receive_level = level
+            else:
+                result = "Invalid or unauthorized receive level.\n"
+        text = result + f"Alerts: {'enabled' if person.alerts_enabled else 'disabled'}\nAdmin level: {person.admin_level}\nReceive level: {person.receive_level}"
+        rows = [[InlineKeyboardButton(f"Receive {n}", callback_data=f"rl:{n}") for n in alert_levels() if n >= person.admin_level]] if person.alerts_enabled else [[InlineKeyboardButton("Subscribe to alerts", callback_data="al:yes")]]
+    await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def on_alertlevel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.id != update.effective_user.id:
+        await update.effective_message.reply_text("Use private chat.")
+        return
+    with session() as db:
+        if not is_owner(db, update.effective_user.id):
+            response = "Owner only."
+        else:
+            try:
+                target, level = map(int, context.args or [])
+                if level not in alert_levels():
+                    raise ValueError()
+            except (ValueError, TypeError):
+                response = "Usage: /alertlevel telegram_id N"
+            else:
+                person = db.scalar(select(User).where(User.telegram_id == target))
+                if not person:
+                    response = "Unknown user."
+                else:
+                    person.admin_level = level
+                    person.receive_level = max(level, person.receive_level)
+                    from socrat_bot.logic import audit
+                    audit(db, str(update.effective_user.id), "alerts.admin_level", {"telegram_id": target, "level": level})
+                    response = f"Admin level set to {level}."
+    await update.effective_message.reply_text(response)

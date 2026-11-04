@@ -34,7 +34,17 @@ paths:
       summary: Отправить сообщение или карточку алерта
       description: |
         Этот метод вызывает workflow алертов. Один запрос — один алерт.
-        Бот сам строит карточку и отправляет её копию каждому, у кого включены алерты.
+        Новая firing generation отправляется одобренным подписчикам с receive_level >= level.
+        Начальный level — максимум ALERT_LEVELS (по умолчанию 20); Escalate понижает на один tier.
+        Повторы/Resolved обновляют только доставленные копии текущей generation, даже после disable.
+        Изменение receive_level не переигрывает активные инциденты; эскалация явно допускает новых получателей.
+        Начальный снимок получателей и delivery intents коммитятся вместе с инцидентом до Telegram HTTP.
+        Ошибка первой отправки или restart не теряет исходных получателей; поздние подписчики не добавляются.
+        Webhook, outbox, SPI, notes и mute используют общий DB lease на копию и content revisions;
+        новые тексты/аннотации не теряются при запросе в полёте. DB transaction во время HTTP не удерживается.
+        Без получателей возвращается copies: [], без fallback на chat_id.
+        Если получатели есть, но доставка никому не завершена, возвращается 502 с durable retry.
+        При частичном успехе copies содержит завершённые копии.
         Поле chat_id в этом случае не выбирает получателей.
         Повтор того же алерта правит уже отправленную карточку. Resolved дописывается
         в ту же строку, что и название. Следующее срабатывание после закрытия создаёт новое сообщение.
@@ -392,7 +402,7 @@ components:
         chat_id:
           type: integer
           format: int64
-          description: Чат для обычного сообщения. Для алерта получатели берутся из подписки.
+          description: Чат для обычного сообщения. Для алерта получатели определяются incident generation и receive_level; fallback нет.
         text:
           type: string
         alert:
@@ -547,7 +557,7 @@ components:
           description: Ключ карточки. Для обычного сообщения нет.
         copies:
           type: array
-          description: Каждая отправленная копия.
+          description: Завершённые копии. Пусто, если нет допустимых получателей; незавершённая доставка сохраняется для durable retry.
           items:
             type: object
             required:
@@ -583,6 +593,26 @@ components:
       properties:
         key:
           type: string
+        generation:
+          type: integer
+        level:
+          type: integer
+          nullable: true
+        escalation_history:
+          type: array
+          items:
+            type: object
+            properties:
+              from:
+                type: integer
+              level:
+                type: integer
+              actor:
+                type: integer
+                format: int64
+              at:
+                type: string
+                format: date-time
         status:
           type: string
           enum: [firing, resolved]
@@ -609,6 +639,8 @@ components:
                 type: integer
                 format: int64
                 nullable: true
+              generation:
+                type: integer
               status:
                 type: string
               text_stored:
@@ -619,41 +651,7 @@ components:
         cards:
           type: array
           items:
-            type: object
-            required: [key, status, copies]
-            properties:
-              key:
-                type: string
-              status:
-                type: string
-                enum: [firing, resolved]
-              text_stored:
-                type: boolean
-              spi_url:
-                type: string
-                nullable: true
-              spi_label:
-                type: string
-                nullable: true
-              note:
-                type: string
-                nullable: true
-              copies:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    chat_id:
-                      type: integer
-                      format: int64
-                    message_id:
-                      type: integer
-                      format: int64
-                      nullable: true
-                    status:
-                      type: string
-                    text_stored:
-                      type: boolean
+            $ref: "#/components/schemas/CardSummary"
     Audience:
       type: object
       properties:
@@ -675,3 +673,9 @@ components:
         username:
           type: string
           nullable: true
+        admin_level:
+          type: integer
+          description: Assigned authority tier; lower numbers have higher authority.
+        receive_level:
+          type: integer
+          description: New firing delivery threshold, greater than or equal to admin_level.

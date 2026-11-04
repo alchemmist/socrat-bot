@@ -3,15 +3,16 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if SRC.is_dir() and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from socrat_bot.models import Base  # noqa: E402
+from socrat_bot.models import Base
 
 config = context.config
 if config.config_file_name is not None:
@@ -38,18 +39,30 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def migrate_connection(connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=connection.dialect.name == "sqlite",
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        migrate_connection(supplied)
+        return
+    from socrat_bot.db import migration_lock
     section = config.get_section(config.config_ini_section) or {}
     section["sqlalchemy.url"] = database_url()
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            render_as_batch=connection.dialect.name == "sqlite",
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+    try:
+        with connectable.connect() as connection, migration_lock(connection):
+            migrate_connection(connection)
+    finally:
+        connectable.dispose()
 
 
 if context.is_offline_mode():

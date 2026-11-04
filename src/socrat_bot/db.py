@@ -2,13 +2,16 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 _engine = None
 _Session = None
+_migration_thread_lock = Lock()
+MIGRATION_LOCK_ID = 0x534F435241544442
 
 
 def database_url() -> str:
@@ -48,14 +51,44 @@ def _alembic_ini() -> Path:
 
 
 def init_schema() -> None:
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     ini = _alembic_ini()
     cfg = Config(str(ini))
     cfg.set_main_option("script_location", str(ini.parent / "alembic"))
     cfg.set_main_option("sqlalchemy.url", database_url().replace("%", "%%"))
-    command.upgrade(cfg, "head")
+    # Alembic's module proxy is not thread-safe; PostgreSQL session advisory ownership
+    # also serializes independent bot/broker processes before version-table inspection.
+    with _migration_thread_lock:
+        migration_engine = create_engine(database_url(), poolclass=NullPool)
+        try:
+            with migration_engine.connect() as connection, migration_lock(connection):
+                cfg.attributes["connection"] = connection
+                command.upgrade(cfg, "head")
+        finally:
+            migration_engine.dispose()
+
+
+@contextmanager
+def migration_lock(connection):
+    postgres = connection.dialect.name == "postgresql"
+    if postgres:
+        connection.execute(
+            text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK_ID}
+        )
+        connection.commit()  # session-level lock survives migration transactions
+    try:
+        yield
+    finally:
+        if postgres:
+            if connection.in_transaction():
+                connection.rollback()
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_LOCK_ID}
+            )
+            connection.commit()
 
 
 @contextmanager

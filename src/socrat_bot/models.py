@@ -1,7 +1,16 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -27,6 +36,8 @@ class User(Base):
     panel_client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     uses_vpn: Mapped[bool] = mapped_column(default=False)
     alerts_enabled: Mapped[bool] = mapped_column(default=False)
+    admin_level: Mapped[int] = mapped_column(Integer, default=20)
+    receive_level: Mapped[int] = mapped_column(Integer, default=20)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -101,3 +112,40 @@ class SudoRequest(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     action_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("actions.id"), nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Incident(Base):
+    __tablename__ = "incidents"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    level: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="firing")
+    history: Mapped[list] = mapped_column(JSONType, default=list)
+
+
+class AlertOutbox(Base):
+    __tablename__ = "alert_outbox"
+    __table_args__ = (Index("ix_alert_outbox_due", "done", "available_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    payload: Mapped[dict] = mapped_column(JSONType)
+    done: Mapped[bool] = mapped_column(default=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CardDelivery(Base):
+    """Recipient intent, authoritative content revision and cross-process HTTP lease."""
+    __tablename__ = "card_deliveries"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer)
+    message_generation: Mapped[int] = mapped_column(Integer, default=0)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    delivered_revision: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spi_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spi_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    buttons: Mapped[list] = mapped_column(JSONType, default=list)
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
