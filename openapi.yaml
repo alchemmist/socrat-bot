@@ -240,27 +240,43 @@ paths:
           description: Секрет webhook не совпал
   /v1/cards:
     get:
-      tags: [alerts]
+      tags:
+      - alerts
       operationId: listCards
       summary: Открытые карточки и их копии
-      description: |
-        По умолчанию только ещё открытые (firing). status=resolved или status=all меняет выбор.
-        text_stored=false значит текст карточки ещё не сохранён и ссылку или заметку писать рано (будет 409).
+      description: 'По умолчанию только ещё открытые (firing). status=resolved или status=all
+        меняет выбор.
+
+        text_stored=false значит текст карточки ещё не сохранён и ссылку или заметку
+        писать рано (будет 409).
+
+        '
       parameters:
-        - name: status
-          in: query
-          schema:
-            type: string
-            enum: [firing, resolved, all]
-            default: firing
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - firing
+          - resolved
+          - all
+          default: firing
+      - name: episode
+        in: query
+        required: false
+        schema:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        description: Find retained immutable SPI episode cards, including resolved with
+          status=all.
       responses:
-        "200":
+        '200':
           description: Карточки
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CardList"
-        "401":
+                $ref: '#/components/schemas/CardList'
+        '401':
           description: Нет или неверный X-Internal-Token
   /v1/cards/item:
     get:
@@ -400,7 +416,9 @@ components:
       properties:
         status:
           type: string
-          enum: [firing, resolved]
+          enum:
+          - firing
+          - resolved
         labels:
           type: object
           additionalProperties:
@@ -411,6 +429,11 @@ components:
             type: string
         fingerprint:
           type: string
+        spi_episode:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+          description: Authoritative SPI episode digest. Creates an immutable episode-specific
+            card key; firing/resolved share it, later firings use a new key.
     Card:
       type: object
       required: [key, title]
@@ -446,7 +469,8 @@ components:
                 type: string
     CardLink:
       type: object
-      required: [url]
+      required:
+      - url
       properties:
         url:
           type: string
@@ -458,7 +482,22 @@ components:
           type: string
           description: Ключ карточки, если он уже известен.
         alert:
-          $ref: "#/components/schemas/Alert"
+          $ref: '#/components/schemas/Alert'
+        expected_copies:
+          type: array
+          maxItems: 1000
+          items:
+            type: object
+            required:
+            - chat_id
+            - message_id
+            properties:
+              chat_id:
+                type: integer
+              message_id:
+                type: integer
+          description: 'Optional atomic guard: all listed chat/message identities must
+            still belong to this card, otherwise409.'
     CardLinkResult:
       type: object
       properties:
@@ -475,6 +514,19 @@ components:
               message_id:
                 type: integer
                 format: int64
+        pending:
+          type: array
+          items:
+            type: object
+            required:
+            - chat_id
+            - message_id
+            properties:
+              chat_id:
+                type: integer
+              message_id:
+                type: integer
+          description: Copies not acknowledged by Telegram; retry even on HTTP200.
     SentMessage:
       type: object
       properties:
@@ -494,7 +546,9 @@ components:
           description: Каждая отправленная копия.
           items:
             type: object
-            required: [chat_id, message_id]
+            required:
+            - chat_id
+            - message_id
             properties:
               chat_id:
                 type: integer
@@ -504,6 +558,10 @@ components:
                 format: int64
               replayed:
                 type: boolean
+        episode:
+          type: string
+        immutable_key:
+          type: boolean
     CardNote:
       type: object
       required: [text]

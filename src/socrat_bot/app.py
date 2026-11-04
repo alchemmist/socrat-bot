@@ -510,26 +510,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     text = add_note(text, note)
         else:
             key = ""
-    empty = InlineKeyboardMarkup([])
-    for chat_id, message_id in copies:
-        try:
-            await context.bot.edit_message_text(
-                text,
-                chat_id=chat_id,
-                message_id=message_id,
-                parse_mode="HTML" if html else None,
-                reply_markup=empty if action.type == "alert.silence" and result.get("status") == "silenced" else None,
-            )
-        except Exception:
-            pass
-    if key and text:
-        def remember_mute() -> None:
-            with session() as db:
-                for chat_id, _message_id in copies:
-                    row = db.get(TelegramCard, (key, chat_id))
-                    if row is not None:
-                        row.text = text
-        await asyncio.to_thread(remember_mute)
+    card_lock = _card_locks.setdefault(key, asyncio.Lock()) if key else None
+    if card_lock is not None:
+        await card_lock.acquire()
+    try:
+        if key:
+            latest_url,latest_label=await asyncio.to_thread(_saved_spi,key)
+            if latest_url:
+                text=replace_spi_link(text,spi_url,spi_label,latest_url,latest_label)
+        empty = InlineKeyboardMarkup([])
+        for chat_id, message_id in copies:
+            try:
+                await context.bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    parse_mode="HTML" if html else None,
+                    reply_markup=empty if action.type == "alert.silence" and result.get("status") == "silenced" else None,
+                )
+            except Exception:
+                pass
+        if key and text:
+            def remember_mute() -> None:
+                with session() as db:
+                    for chat_id, _message_id in copies:
+                        row = db.get(TelegramCard, (key, chat_id))
+                        if row is not None:
+                            row.text = text
+            await asyncio.to_thread(remember_mute)
+    finally:
+        if card_lock is not None:
+            card_lock.release()
 
 
 async def _broadcast_loop() -> None:
@@ -676,13 +687,6 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
     text = render_card(card) if card is not None else body.text
     if not text:
         raise HTTPException(status_code=400, detail="text or alert required")
-    if card is not None:
-        spi_url, spi_label = await asyncio.to_thread(_saved_spi, card.key)
-        if spi_url:
-            text = add_link(text, spi_url, spi_label)
-        note = await asyncio.to_thread(_saved_note, card.key)
-        if note:
-            text = add_note(text, note)
     parse_mode = "HTML" if card is not None or body.parse_mode == "HTML" else body.parse_mode
 
     def chats() -> list[int]:
@@ -787,6 +791,13 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
     if lock is not None:
         await lock.acquire()
     try:
+        if card is not None:
+            spi_url, spi_label = await asyncio.to_thread(_saved_spi, card.key)
+            if spi_url:
+                text = add_link(text, spi_url, spi_label)
+            note = await asyncio.to_thread(_saved_note, card.key)
+            if note:
+                text = add_note(text, note)
         delivered: list[dict] = []
         failure: HTTPException | None = None
         for chat_id in await asyncio.to_thread(chats):
@@ -810,6 +821,9 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
             result["replayed"] = True
         if card is not None:
             result["key"] = card.key
+            if body.alert and body.alert.get("spi_episode"):
+                result["episode"] = body.alert["spi_episode"]
+                result["immutable_key"] = True
         return result
     finally:
         if lock is not None:
@@ -822,61 +836,69 @@ class CardLinkIn(BaseModel):
     label: str = "SPI"
     key: str | None = None
     alert: dict | None = None
+    expected_copies: list[dict] | None = None
 
 
 @api.post("/v1/cards/links")
 async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(default=None)):
     require_internal(x_internal_token)
-    if body.key:
-        key = body.key
-    elif body.alert:
-        key = build_alert(body.alert).key
-    else:
+    key = body.key or (build_alert(body.alert).key if body.alert else None)
+    if not key:
         raise HTTPException(status_code=400, detail="key or alert required")
+    # Shared with message/note updates. Desired database state is NOT Telegram ack.
+    async with _card_locks.setdefault(key, asyncio.Lock()):
+        def load():
+            with session() as db:
+                return [(r.chat_id,r.message_id,r.text,r.spi_url,r.spi_label)
+                        for r in db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()]
+        rows = await asyncio.to_thread(load)
+        if not rows:
+            raise HTTPException(status_code=404, detail="card not found")
+        if not any(r[2] for r in rows):
+            raise HTTPException(status_code=409, detail="card text is not stored yet")
+        if body.expected_copies is not None:
+            if not body.expected_copies or len(body.expected_copies)>1000:
+                raise HTTPException(status_code=400, detail="invalid expected copies")
+            expected=set()
+            for copy in body.expected_copies:
+                if type(copy.get("chat_id")) is not int or type(copy.get("message_id")) is not int:
+                    raise HTTPException(status_code=400, detail="invalid expected copy")
+                expected.add((copy["chat_id"],copy["message_id"]))
+            if not expected <= {(r[0],r[1]) for r in rows}:
+                raise HTTPException(status_code=409, detail="card identity changed")
+        token = os.environ["TELEGRAM_BOT_TOKEN"]
+        updated,pending=[],[]
+        async with httpx.AsyncClient(timeout=20) as client:
+            for chat_id,message_id,current,old_url,old_label in rows:
+                pair={"chat_id":chat_id,"message_id":message_id}
+                if not current or not message_id:
+                    pending.append(pair);continue
+                revised = replace_spi_link(current, old_url, old_label, body.url, body.label)
+                try:
+                    # Always re-edit: cached desired text must never fake delivery.
+                    response=await client.post(f"https://api.telegram.org/bot{token}/editMessageText",
+                        json={**pair,"text":revised,"parse_mode":"HTML"})
+                    data=response.json()
+                    if not data.get("ok") and "message is not modified" not in str(data.get("description","")):
+                        pending.append(pair);continue
+                except (httpx.HTTPError,ValueError):
+                    pending.append(pair);continue
+                def save_applied():
+                    with session() as db:
+                        row=db.get(TelegramCard,(key,chat_id))
+                        if row is not None and row.message_id==message_id:
+                            row.spi_url=body.url;row.spi_label=body.label;row.text=revised
+                await asyncio.to_thread(save_applied)
+                updated.append(pair)
+        return {"key":key,"updated":updated,"pending":pending}
 
-    def load() -> list[tuple[int, int | None, str | None]]:
-        with session() as db:
-            rows = db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()
-            return [(row.chat_id, row.message_id, row.text) for row in rows]
 
-    rows = await asyncio.to_thread(load)
-    if not rows:
-        raise HTTPException(status_code=404, detail="card not found")
-    if not any(item[2] for item in rows):
-        raise HTTPException(status_code=409, detail="card text is not stored yet")
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    updated: list[dict] = []
-    async with httpx.AsyncClient(timeout=20) as client:
-        for chat_id, message_id, current in rows:
-            if not current or not message_id:
-                continue
-            revised = add_link(current, body.url, body.label)
-            if revised != current:
-                response = await client.post(
-                    f"https://api.telegram.org/bot{token}/editMessageText",
-                    json={"chat_id": chat_id, "message_id": message_id, "text": revised, "parse_mode": "HTML"},
-                )
-                data = response.json()
-                if not data.get("ok") and "message is not modified" not in str(data):
-                    print(f"spi link {chat_id} {data}", flush=True)
-                    continue
-            updated.append({"chat_id": chat_id, "message_id": message_id})
-
-    def save() -> None:
-        with session() as db:
-            for chat_id, message_id, current in rows:
-                row = db.get(TelegramCard, (key, chat_id))
-                if row is None:
-                    continue
-                row.spi_url = body.url
-                row.spi_label = body.label
-                if row.text:
-                    row.text = add_link(row.text, body.url, body.label)
-
-    await asyncio.to_thread(save)
-    return {"key": key, "updated": updated}
-
-
+def replace_spi_link(text, old_url, old_label, url, label):
+    if old_url and old_url != url:
+        from html import escape
+        anchor='<a href="'+escape(old_url,quote=True)+'">'+escape(old_label or "SPI")+'</a>'
+        text=text.replace(" · "+anchor,"").replace(anchor+" · ","").replace(anchor,"")
+    return add_link(text,url,label)
 
 
 @api.get("/v1/cards/item")
@@ -892,12 +914,19 @@ def get_card_item(key: str, x_internal_token: str | None = Header(default=None))
 
 
 @api.get("/v1/cards")
-def get_cards(status: str = "firing", x_internal_token: str | None = Header(default=None)):
+def get_cards(status: str = "firing", episode: str | None = None, x_internal_token: str | None = Header(default=None)):
     require_internal(x_internal_token)
     if status not in {"firing", "resolved", "all"}:
         raise HTTPException(status_code=400, detail="status must be firing, resolved or all")
     with session() as db:
-        return {"cards": list_cards(db, status)}
+        cards=list_cards(db, status)
+    if episode is not None:
+        import re
+        if not re.fullmatch(r"[a-f0-9]{64}",episode):
+            raise HTTPException(status_code=400,detail="invalid episode")
+        cards=[c for c in cards if c["key"].endswith("/spi/"+episode)]
+        for c in cards:c.update(episode=episode,immutable_key=True)
+    return {"cards":cards}
 
 
 @api.get("/v1/audience")
@@ -928,47 +957,48 @@ async def add_card_note(body: CardNoteIn, x_internal_token: str | None = Header(
     if len(cleaned) > 240:
         raise HTTPException(status_code=400, detail="note is too long")
 
-    def load() -> tuple[str | None, list[tuple[int, int | None, str | None]]]:
-        with session() as db:
-            rows = db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()
-            previous = next((row.note for row in rows if row.note), None)
-            return previous, [(row.chat_id, row.message_id, row.text) for row in rows]
+    async with _card_locks.setdefault(key, asyncio.Lock()):
+        def load() -> tuple[str | None, list[tuple[int, int | None, str | None]]]:
+            with session() as db:
+                rows = db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()
+                previous = next((row.note for row in rows if row.note), None)
+                return previous, [(row.chat_id, row.message_id, row.text) for row in rows]
 
-    previous, rows = await asyncio.to_thread(load)
-    if not rows:
-        raise HTTPException(status_code=404, detail="card not found")
-    if not any(item[2] for item in rows):
-        raise HTTPException(status_code=409, detail="card text is not stored yet")
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    updated: list[dict] = []
-    async with httpx.AsyncClient(timeout=20) as client:
-        for chat_id, message_id, current in rows:
-            if not current or not message_id:
-                continue
-            revised = replace_note(current, previous, cleaned)
-            if revised != current:
-                response = await client.post(
-                    f"https://api.telegram.org/bot{token}/editMessageText",
-                    json={"chat_id": chat_id, "message_id": message_id, "text": revised, "parse_mode": "HTML"},
-                )
-                data = response.json()
-                if not data.get("ok") and "message is not modified" not in str(data):
-                    print(f"card note {chat_id} {data}", flush=True)
+        previous, rows = await asyncio.to_thread(load)
+        if not rows:
+            raise HTTPException(status_code=404, detail="card not found")
+        if not any(item[2] for item in rows):
+            raise HTTPException(status_code=409, detail="card text is not stored yet")
+        token = os.environ["TELEGRAM_BOT_TOKEN"]
+        updated: list[dict] = []
+        async with httpx.AsyncClient(timeout=20) as client:
+            for chat_id, message_id, current in rows:
+                if not current or not message_id:
                     continue
-            updated.append({"chat_id": chat_id, "message_id": message_id})
+                revised = replace_note(current, previous, cleaned)
+                if revised != current:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{token}/editMessageText",
+                        json={"chat_id": chat_id, "message_id": message_id, "text": revised, "parse_mode": "HTML"},
+                    )
+                    data = response.json()
+                    if not data.get("ok") and "message is not modified" not in str(data):
+                        print(f"card note {chat_id} {data}", flush=True)
+                        continue
+                updated.append({"chat_id": chat_id, "message_id": message_id})
 
-    def save() -> None:
-        with session() as db:
-            for chat_id, _message_id, current in rows:
-                row = db.get(TelegramCard, (key, chat_id))
-                if row is None:
-                    continue
-                row.note = cleaned
-                if row.text:
-                    row.text = replace_note(row.text, previous, cleaned)
+        def save() -> None:
+            with session() as db:
+                for chat_id, _message_id, current in rows:
+                    row = db.get(TelegramCard, (key, chat_id))
+                    if row is None:
+                        continue
+                    row.note = cleaned
+                    if row.text:
+                        row.text = replace_note(row.text, previous, cleaned)
 
-    await asyncio.to_thread(save)
-    return {"key": key, "updated": updated}
+        await asyncio.to_thread(save)
+        return {"key": key, "updated": updated}
 
 
 @api.patch("/v1/messages/{message_id}")

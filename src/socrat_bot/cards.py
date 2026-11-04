@@ -471,6 +471,18 @@ def replace_note(text: str, previous: str | None, note: str) -> str:
     return add_note(text, note)
 
 
+def episode_card_key(base: str, payload: dict) -> str:
+    """SPI supplies its authoritative episode digest; keep old episodes addressable."""
+    import re
+    episode = payload.get("spi_episode")
+    if episode is None:
+        return base  # Backward-compatible callers without SPI association.
+    if not isinstance(episode, str) or not re.fullmatch(r"[a-f0-9]{64}", episode):
+        raise ValueError("invalid SPI episode")
+    # Reserve room for mute idempotency suffixes within their 128-character cap.
+    return base[:20] + "/spi/" + episode
+
+
 def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     labels = labels_of(payload.get("labels"))
     annotations = labels_of(payload.get("annotations"))
@@ -491,7 +503,7 @@ def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     summary = annotations.get("summary") or annotations.get("description") or str(payload.get("summary") or "")
     status = "resolved" if str(payload.get("status") or "").lower() == "resolved" else "firing"
     return Card(
-        key=card_key(name, labels),
+        key=episode_card_key(card_key(name, labels), payload),
         title=name,
         where=where,
         summary=summary,
