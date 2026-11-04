@@ -1,3 +1,4 @@
+from socrat_bot.structured_logging import OperationalEvents
 import os
 import shlex
 import uuid
@@ -59,6 +60,7 @@ async def lifespan(_app: FastAPI):
 
 
 api = FastAPI(lifespan=lifespan)
+api.add_middleware(OperationalEvents, component="broker")
 
 
 @api.get("/healthz")
@@ -192,7 +194,7 @@ def main() -> None:
     import uvicorn
 
     port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run("socrat_bot.broker:api", host="0.0.0.0", port=port)
+    uvicorn.run("socrat_bot.broker:api", host="0.0.0.0", port=port, access_log=False)
 
 
 if __name__ == "__main__":

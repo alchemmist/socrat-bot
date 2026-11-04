@@ -63,6 +63,10 @@ from socrat_bot.models import (
     User,
 )
 
+from socrat_bot.structured_logging import OperationalEvents, configure_logging
+
+log = configure_logging()
+
 ptb: Application | None = None
 _updates: set[asyncio.Task] = set()
 
@@ -137,8 +141,8 @@ def schedule_action_event(event: dict) -> None:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 await client.post(url, json=event, headers=headers)
-        except Exception as exc:
-            print(f"action webhook {exc}", flush=True)
+        except Exception:
+            log.error("action webhook failed")
 
     try:
         asyncio.get_running_loop().create_task(send())
@@ -197,7 +201,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         person = ensure_user(db, user.id, user.username)
         uses_vpn = bool(person.uses_vpn)
         alerts = bool(person.alerts_enabled)
-        print(f"telegram_start id={user.id} role={person.role}", flush=True)
+        log.info("telegram start")
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
@@ -627,11 +631,11 @@ async def _broadcast_loop() -> None:
                         row.status = "sent"
                         row.sent = result["sent"]
                         row.failed = result["failed"]
-                print(f"broadcast {broadcast_id} {result.get('status')}", flush=True)
+                log.info("broadcast completed", extra={"sent": result["sent"], "failed": result["failed"]})
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            print(f"broadcast loop {exc}", flush=True)
+        except Exception:
+            log.error("broadcast loop failed")
 
 
 def _result_text(action: Action, result: dict) -> str:
@@ -683,7 +687,7 @@ async def _register_webhook() -> None:
                 "allowed_updates": ["message", "callback_query"],
             },
         )
-    print(f"telegram webhook {response.status_code}", flush=True)
+    log.info("telegram webhook completed", extra={"status": response.status_code})
 
 
 @asynccontextmanager
@@ -716,6 +720,7 @@ async def lifespan(app: FastAPI):
 
 
 api = FastAPI(lifespan=lifespan)
+api.add_middleware(OperationalEvents, component="bot")
 
 
 @api.get("/healthz")
@@ -741,8 +746,8 @@ async def _run_update(payload: dict) -> None:
     try:
         update = Update.de_json(payload, ptb.bot)
         await ptb.process_update(update)
-    except Exception as exc:
-        print(f"telegram update {exc}", flush=True)
+    except Exception:
+        log.error("telegram update failed")
 
 
 @api.post("/v1/messages")
