@@ -1006,7 +1006,7 @@ init_schema()
     with database._engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0011_delivery_ownership"
+            == "0012_alerts_approval"
         )
     command = [sys.executable, "-m", "alembic"]
     subprocess.run(
@@ -1611,3 +1611,130 @@ def test_pg_spi_acceptance_refreshes_copy_materialized_during_lock_wait(
     asyncio.run(dispatch_jobs(link_jobs))
     result = spi_acknowledgements("spi-materialize", pairs, link_jobs, url, 1)
     assert len(result["updated"]) == 2 and result["pending"] == []
+
+
+def test_unsubscribe_preserves_approval_and_resubscribe_needs_no_owner(store, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from socrat_bot import app
+
+    with database.session() as db:
+        ensure_user(db, 1)
+        person = ensure_user(db, 2)
+        person.uses_vpn = True
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    def query(actor=2, data="al:yes", chat=2):
+        return SimpleNamespace(
+            from_user=SimpleNamespace(id=actor, username=None),
+            message=SimpleNamespace(chat_id=chat, reply_text=AsyncMock()),
+            data=data,
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            get_bot=lambda: bot,
+        )
+
+    asyncio.run(app._request_alerts(query()))
+    assert bot.send_message.await_count == 1
+    assert bot.send_message.call_args.args[0] == 1  # first request reaches owner
+    with database.session() as db:
+        person = db.scalar(select(User).where(User.telegram_id == 2))
+        assert not person.alerts_enabled and not person.alerts_approved
+    asyncio.run(app._approve_alerts(query(actor=1, data="al:ok:2", chat=1)))
+    bot.send_message.reset_mock()
+    for method in ("command", "button", "alerts off"):
+        user = SimpleNamespace(id=2, username=None)
+        msg = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_user=user, effective_chat=SimpleNamespace(id=2), effective_message=msg)
+        if method == "command":
+            asyncio.run(app.on_unsubscribe(update, SimpleNamespace()))
+        elif method == "button":
+            asyncio.run(app.on_callback(SimpleNamespace(callback_query=query(data="al:no")), SimpleNamespace()))
+        else:
+            asyncio.run(app.on_alerts(update, SimpleNamespace(args=["off"])))
+        with database.session() as db:
+            person = db.scalar(select(User).where(User.telegram_id == 2))
+            assert not person.alerts_enabled
+            assert person.alerts_approved and person.uses_vpn
+            assert person.admin_level == person.receive_level == 20
+            assert 2 not in route(db, "new-after-unsubscribe-" + method, True)
+        # Merely opening /start (ensure_user) must not resubscribe.
+        with database.session() as db:
+            assert not ensure_user(db, 2).alerts_enabled
+        asyncio.run(app._request_alerts(query()))
+        assert bot.send_message.await_count == 0
+        with database.session() as db:
+            person = db.scalar(select(User).where(User.telegram_id == 2))
+            assert person.alerts_enabled and person.alerts_approved
+            assert list(db.scalars(select(TelegramCard))) == []  # no backlog replay
+    assert app._start_keyboard(True, True).inline_keyboard[0][0].callback_data == "al:no"
+    assert app._start_keyboard(True, False).inline_keyboard[0][0].callback_data == "al:yes"
+
+
+def test_unsubscribe_private_and_unapproved_cannot_enable(store):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from socrat_bot import app
+
+    with database.session() as db:
+        ensure_user(db, 1)
+        ensure_user(db, 2)
+    reply = AsyncMock()
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=2, username=None), effective_chat=SimpleNamespace(id=2), effective_message=SimpleNamespace(reply_text=reply))
+    asyncio.run(app.on_alerts(update, SimpleNamespace(args=["on"])))
+    assert "Approval required" in reply.call_args.args[0]
+    with database.session() as db:
+        assert not ensure_user(db, 2).alerts_enabled
+        owner = ensure_user(db, 1)
+        owner.alerts_enabled = True
+    update.effective_user.id = 1
+    update.effective_chat.id = -123
+    asyncio.run(app.on_unsubscribe(update, SimpleNamespace()))
+    with database.session() as db:
+        assert ensure_user(db, 1).alerts_enabled
+    update.effective_chat.id = 1
+    asyncio.run(app.on_unsubscribe(update, SimpleNamespace()))
+    with database.session() as db:
+        owner = ensure_user(db, 1)
+        assert owner.alerts_approved and not owner.alerts_enabled
+
+
+def test_old_approval_button_cannot_undo_unsubscribe(store):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from socrat_bot import app
+    from socrat_bot.logic import approve_alerts
+
+    with database.session() as db:
+        ensure_user(db, 1)
+        person = approve_alerts(db, 2)
+        person.alerts_enabled = False
+    bot = SimpleNamespace(send_message=AsyncMock())
+    query = SimpleNamespace(data="al:ok:2", from_user=SimpleNamespace(id=1), answer=AsyncMock(), edit_message_text=AsyncMock(), get_bot=lambda: bot)
+    asyncio.run(app._approve_alerts(query))
+    with database.session() as db:
+        person = ensure_user(db, 2)
+        assert person.alerts_approved and not person.alerts_enabled
+    assert bot.send_message.await_count == 0
+
+
+def test_unsubscribe_fences_prepared_new_delivery(store, monkeypatch):
+    from socrat_bot.cards import Card
+    from socrat_bot.delivery import submit_card
+    from socrat_bot.escalation import _deliver_work, prepare_work
+
+    with database.session() as db:
+        ensure_user(db, 1)
+        person = ensure_user(db, 2)
+        person.alerts_enabled = True
+        person.alerts_approved = True
+    _recipients, jobs = submit_card(Card(key="prepared-unsubscribe", title="Test", where="", summary="", status="firing"))
+    work = next(w for id_ in jobs if (w := prepare_work(id_)) and w[2]["chat_id"] == 2)
+    with database.session() as db:
+        db.scalar(select(User).where(User.telegram_id == 2)).alerts_enabled = False
+    calls = response_client(monkeypatch)
+    assert not asyncio.run(_deliver_work(work))
+    assert calls == []

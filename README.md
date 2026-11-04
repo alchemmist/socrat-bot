@@ -88,7 +88,7 @@ The link label is `SPI`. The same alert sent again keeps the link. `key` may be 
 
 `/start` stores the Telegram user. The reply is `Socrat is online.` with `I use VPN` and `Subscribe to alerts` until each one is done. Pressing the VPN button sets `uses_vpn` and does not change an owner into a regular user. A normal user becomes role `vpn`. The broadcast audience is everyone with `uses_vpn`, including an owner who opted in. A panel link code is separate and does not by itself add the person to this list.
 
-`Subscribe to alerts` asks an owner to approve. After approval, `alerts_enabled` is set and that chat receives cards according to its receive level (see below). Mute still creates one Alertmanager silence and updates every admin's copy of that card: the buttons go away and the message says how long it is muted. The owner is subscribed from the start.
+`Subscribe to alerts` asks an owner to approve. After approval, `alerts_approved` and `alerts_enabled` are set and that chat receives cards according to its receive level (see below). Mute still creates one Alertmanager silence and updates every admin's copy of that card: the buttons go away and the message says how long it is muted. The owner is subscribed from the start.
 
 The owner lists those Telegram accounts with `/clients`. Each known username is shown as `@username`. Someone who only pressed `/start` is not included.
 
@@ -113,15 +113,19 @@ Escalate advances exactly one tier toward the smallest. Keep configured levels
 stable while incidents are open. The owner starts with admin 10 / receive 20;
 migration 0010 gives all other existing users admin 20 / receive 20. Newly
 approved users start at the largest (lowest-authority) configured tier.
-`alerts_enabled` remains the approval authority; there is no new role.
+`alerts_approved` stores permanent owner approval; `alerts_enabled` controls current delivery. There is no new role.
 
 In private Telegram chat:
 
 * `/alerts` shows English approval/admin/receive settings and receive-level buttons.
 * `/alerts level N` changes receive mode, subject to `receive_level >= admin_level`.
 * `/alerts off` (or `disable`) stops new cards and short notifications. `/alerts on`
-  (or `enable`) retains owner enable and the existing owner-approval flow for
-  subscribers. A disabled non-owner requests approval again via `/start`.
+  (or `enable`) restores delivery for already-approved subscribers without another
+  owner request. First-time subscribers still require owner approval.
+* `/unsubscribe` and the **Unsubscribe** button stop alert delivery without changing
+  approval, VPN opt-in, admin tier, or receive tier. `/start` → **Subscribe to alerts**
+  restores delivery without replaying existing incidents. Old approval buttons do
+  not undo a later unsubscribe.
 * Owner-only `/alertlevel TELEGRAM_ID N` assigns an existing user's admin tier;
   an incompatible receive tier is raised to that admin tier. This does not approve
   the subscriber or replay incidents.
@@ -227,3 +231,11 @@ Migration 0011 preserves populated upstream 0009 desired/applied fences, includi
 historical applied revisions, and enqueues recovery for accepted-but-unapplied
 SPI links. CI runs the PostgreSQL concurrency/migration/SPI suite on a PostgreSQL
 17 service on every release before the unchanged image publication/deploy chain.
+
+### Persistent alert approval migration
+
+Migration `0012_alerts_approval` separates one-time owner approval from current
+delivery. It preserves existing enabled subscribers, owners, and previously
+approved opted-out users recoverable from `alerts.approve` audit entries. VPN
+opt-in alone never grants alert access. Existing delivered cards still receive
+state/resolution edits after opt-out; no new cards or escalation notices are sent.

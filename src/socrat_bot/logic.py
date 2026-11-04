@@ -50,6 +50,7 @@ def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> U
             role="owner" if promote else "user",
             uses_vpn=False,
             alerts_enabled=promote,
+            alerts_approved=promote,
             admin_level=alert_levels()[0] if promote else alert_levels()[-1],
             receive_level=alert_levels()[-1],
         )
@@ -57,8 +58,11 @@ def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> U
     elif promote and user.role != "owner":
         user.role = "owner"
         user.alerts_enabled = True
+        user.alerts_approved = True
         user.admin_level = alert_levels()[0]
         user.receive_level = max(user.receive_level, user.admin_level)
+    if user.alerts_enabled or user.role == "owner":
+        user.alerts_approved = True
     if username is not None:
         user.username = username.lstrip("@") or None
     db.flush()
@@ -304,8 +308,10 @@ def owners(db: Session) -> list[User]:
 
 def approve_alerts(db: Session, telegram_id: int, username: str | None = None) -> User:
     user = ensure_user(db, telegram_id, username)
-    user.alerts_enabled = True
-    audit(db, str(telegram_id), "alerts.approve", {"role": user.role})
+    if not user.alerts_approved:
+        user.alerts_enabled = True
+        user.alerts_approved = True
+        audit(db, str(telegram_id), "alerts.approve", {"role": user.role})
     return user
 
 

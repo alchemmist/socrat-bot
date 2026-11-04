@@ -619,6 +619,13 @@ def authorize_http(work: Work) -> bool:
         )
         if state.lease_owner != uuid.UUID(p["_owner"]):
             return False
+        if _method == "sendMessage":
+            user = db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
+            if not user or not user.alerts_enabled:
+                # An unsubscribe may arrive after this work was prepared.
+                db.get(AlertOutbox, id_).done = True
+                state.lease_owner = state.lease_until = None
+                return False
         card = db.get(TelegramCard, (p["key"], p["chat_id"]))
         stale_state = state.link_revision > p.get("_link_revision", 0) or (
             state.link_revision == p.get("_link_revision", 0)

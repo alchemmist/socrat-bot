@@ -36,6 +36,7 @@ class User(Base):
     panel_client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     uses_vpn: Mapped[bool] = mapped_column(default=False)
     alerts_enabled: Mapped[bool] = mapped_column(default=False)
+    alerts_approved: Mapped[bool] = mapped_column(default=False)
     admin_level: Mapped[int] = mapped_column(Integer, default=20)
     receive_level: Mapped[int] = mapped_column(Integer, default=20)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
