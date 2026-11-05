@@ -2,12 +2,12 @@ import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import timezone, datetime
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -43,6 +43,7 @@ from socrat_bot.logic import (
     claim_due_broadcasts,
     consume_link,
     create_action,
+    as_utc,
     deliver_broadcast,
     ensure_user,
     format_vpn_clients,
@@ -328,6 +329,9 @@ async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if message is None or user is None:
         return
+    if message.chat_id != user.id:
+        await message.reply_text("This command is available in private chat only.")
+        return
     text = " ".join(context.args or []).strip()
     with session() as db:
         if not is_owner(db, user.id):
@@ -338,10 +342,62 @@ async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
         row = begin_mailing(db, user.id, text)
         broadcast_id = row.id
-    await message.reply_text(
+    response = await message.reply_text(
         "Pick a day. Time is Europe/Moscow.",
         reply_markup=_date_keyboard(broadcast_id, datetime.now(broadcast_zone())),
     )
+
+    with session() as db:
+        db.get(Broadcast, broadcast_id).message_id = response.message_id
+
+
+async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from sqlalchemy import select
+    from .mailing import edit_mailing
+
+    message = update.message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    with session() as db:
+        allowed = is_owner(db, user.id)
+    if not allowed or message.chat_id != user.id:
+        await message.reply_text("This command is available to the owner in private chat only.")
+        return
+    raw = (message.text or "").split(maxsplit=1)
+    value = raw[1] if len(raw) > 1 else ""
+    broadcast_id = None
+    if message.reply_to_message:
+        with session() as db:
+            broadcast_id = db.scalar(select(Broadcast.id).where(
+                Broadcast.chat_id == user.id,
+                Broadcast.message_id == message.reply_to_message.message_id,
+                Broadcast.status == "sent",
+            ))
+    if broadcast_id is None and value:
+        parts = value.split(maxsplit=1)
+        try:
+            broadcast_id = uuid.UUID(parts[0])
+            value = parts[1] if len(parts) > 1 else ""
+        except ValueError:
+            pass
+    if broadcast_id is None or not value:
+        with session() as db:
+            rows = list(db.scalars(select(Broadcast).where(
+                Broadcast.chat_id == user.id, Broadcast.status == "sent",
+            ).limit(20)))
+            from .models import BroadcastCopy
+            tracked = set(db.scalars(select(BroadcastCopy.broadcast_id).where(
+                BroadcastCopy.broadcast_id.in_([row.id for row in rows]),
+            )))
+        listing = "\n".join(
+            f"{row.id} {'editable' if row.id in tracked else 'unavailable (no saved IDs)'} {row.text[:60]}"
+            for row in rows
+        )
+        await message.reply_text("Usage: /mailing_edit UUID NEW_TEXT; or reply to the delivery summary with /mailing_edit NEW_TEXT.\nOlder mailings without saved message IDs are unavailable.\n" + listing)
+        return
+    result = await edit_mailing(broadcast_id, user.id, value)
+    await message.reply_text(result[:4096])
 
 
 async def _on_mailing_callback(query, data: str) -> bool:
@@ -363,7 +419,7 @@ async def _on_mailing_callback(query, data: str) -> bool:
     pending_text = None
     pending_ids: list[int] = []
     with session() as db:
-        if not is_owner(db, query.from_user.id):
+        if not is_owner(db, query.from_user.id) or query.message is None or query.message.chat_id != query.from_user.id:
             notice = "This command is available to the owner only."
         else:
             row = db.get(Broadcast, broadcast_id)
@@ -399,22 +455,27 @@ async def _on_mailing_callback(query, data: str) -> bool:
                 row.status = "scheduled"
                 count = len(vpn_audience(db))
                 local = send_at.astimezone(broadcast_zone()).strftime("%Y-%m-%d %H:%M")
-                notice = f"Scheduled for {local} {broadcast_zone().key}. VPN recipients now: {count}."
+                notice = f"Scheduled for {local} {broadcast_zone().key}. VPN recipients now: {count}.\nMailing {broadcast_id}\nAfter delivery: /mailing_edit {broadcast_id} NEW_TEXT"
             elif kind == "n":
+                claimed = db.execute(sql_update(Broadcast).where(
+                    Broadcast.id == broadcast_id, Broadcast.status == "choosing",
+                    Broadcast.chat_id == query.from_user.id,
+                ).values(status="sending")).rowcount
+                if not claimed:
+                    return True
                 pending_text = row.text
                 pending_ids = [user.telegram_id for user in vpn_audience(db)]
-                row.status = "sending"
             else:
                 return True
     if pending_text is not None:
-        result = await deliver_broadcast(pending_text, pending_ids)
+        result = await deliver_broadcast(pending_text, pending_ids, broadcast_id)
         with session() as db:
             stored = db.get(Broadcast, broadcast_id)
             if stored is not None:
                 stored.status = "sent"
                 stored.sent = result["sent"]
-                stored.failed = result["failed"]
-        notice = _delivery_notice("Sent now", result)
+                stored.failed = result["failed"] + [{"accepted_untracked": item} for item in result.get("untracked", [])]
+        notice = _delivery_notice("Sent now", result) + f"\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT"
     if notice:
         await query.edit_message_text(notice)
     return True
@@ -556,6 +617,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     actor = str(query.from_user.id)
     mute_generation = None
     action_id = uuid.UUID(query.data.removeprefix("act:"))
+    from sqlalchemy import update as sql_update
+    legacy = None
+    with session() as db:
+        candidate = db.get(Action, action_id)
+        if candidate and candidate.type == "broadcast.send":
+            if not is_owner(db, query.from_user.id):
+                return
+            if candidate.status != "pending" or (candidate.expires_at and as_utc(candidate.expires_at) < datetime.now(timezone.utc)):
+                return
+            claimed = db.execute(sql_update(Action).where(Action.id == action_id, Action.status == "pending").values(status="running")).rowcount
+            if not claimed:
+                return
+            row = db.get(Broadcast, uuid.UUID(candidate.payload["broadcast_id"]))
+            if row is None or row.status != "preview":
+                candidate.status = "failed"
+                return
+            row.status = "sending"
+            legacy = (row.id, row.text, [person.telegram_id for person in vpn_audience(db)])
+    if legacy:
+        broadcast_id, body, recipients = legacy
+        result = await deliver_broadcast(body, recipients, broadcast_id)
+        with session() as db:
+            row = db.get(Broadcast, broadcast_id)
+            row.status, row.sent, row.failed = "sent", result["sent"], result["failed"] + [{"accepted_untracked": item} for item in result.get("untracked", [])]
+            action = db.get(Action, action_id)
+            action.status, action.result = "done", result
+        await query.edit_message_text(_delivery_notice("Broadcast", result) + f"\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT")
+        return
     with session() as db:
         action = db.get(Action, action_id)
         if action is None:
@@ -629,13 +718,13 @@ async def _broadcast_loop() -> None:
                         continue
                     text = row.text
                     recipients = [user.telegram_id for user in vpn_audience(db)]
-                result = await deliver_broadcast(text, recipients)
+                result = await deliver_broadcast(text, recipients, broadcast_id)
                 with session() as db:
                     row = db.get(Broadcast, broadcast_id)
                     if row is not None:
                         row.status = "sent"
                         row.sent = result["sent"]
-                        row.failed = result["failed"]
+                        row.failed = result["failed"] + [{"accepted_untracked": item} for item in result.get("untracked", [])]
                 log.info("broadcast completed", extra={"sent": result["sent"], "failed": result["failed"]})
         except asyncio.CancelledError:
             raise
@@ -669,6 +758,10 @@ def _delivery_notice(title: str, result: dict) -> str:
     sent = result.get("sent", 0)
     failed = result.get("failed") or []
     text = f"{title}. Delivered {sent}."
+    if result.get("untracked"):
+        details = ", ".join(f"{copy['chat_id']}/{copy['message_id']}" for copy in result["untracked"])
+        text += f"\nWARNING: accepted but receipt not saved (chat/message): {details}. Do not resend."
+
     if not failed:
         return text
     lines = "\n".join(f"\u2022 {item}" for item in failed)
@@ -966,20 +1059,22 @@ async def broadcasts(body: BroadcastIn, x_internal_token: str | None = Header(de
         )
         preview = f"Broadcast draft:\n{body.text}"
         markup = keyboard([("Send", f"act:{send.id}", 0), ("Cancel", f"act:{cancel.id}", 0)])
-        token = os.environ["TELEGRAM_BOT_TOKEN"]
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": body.chat_id, "text": preview, "reply_markup": markup.to_dict()},
-            )
-            data = response.json()
-            if not data.get("ok"):
-                raise HTTPException(status_code=502, detail=data)
-            message_id = data["result"]["message_id"]
-            row.message_id = message_id
-            send.message_id = message_id
-            cancel.message_id = message_id
-        return {"id": str(row.id), "message_id": message_id}
+        broadcast_id, send_id, cancel_id = row.id, send.id, cancel.id
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": body.chat_id, "text": preview, "reply_markup": markup.to_dict()},
+        )
+        data = response.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=502, detail="Telegram rejected preview")
+        message_id = data["result"]["message_id"]
+    with session() as db:
+        db.get(Broadcast, broadcast_id).message_id = message_id
+        db.get(Action, send_id).message_id = message_id
+        db.get(Action, cancel_id).message_id = message_id
+    return {"id": str(broadcast_id), "message_id": message_id}
 
 
 @api.get("/v1/actions/{action_id}")

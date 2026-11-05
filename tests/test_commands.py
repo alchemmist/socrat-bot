@@ -19,7 +19,7 @@ from socrat_bot.commands import (
 def test_registry_is_valid_and_binds_every_real_command_handler():
     names = [c.name for c in COMMANDS]
     assert len(names) == len(set(names))
-    assert set(names) == {"start", "alerts", "unsubscribe", "clients", "alertlevel", "mailing"}
+    assert set(names) == {"start", "alerts", "unsubscribe", "clients", "alertlevel", "mailing", "mailing_edit"}
     for c in COMMANDS:
         assert re.fullmatch(r"[a-z0-9_]{1,32}", c.name)
         assert 1 <= len(c.description) <= 256

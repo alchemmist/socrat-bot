@@ -76,6 +76,8 @@ class Audit(Base):
 
 class Broadcast(Base):
     __tablename__ = "broadcasts"
+    edit_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    edit_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     text: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="draft")
@@ -151,3 +153,12 @@ class CardDelivery(Base):
     link_revision: Mapped[int] = mapped_column(Integer, default=0)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BroadcastCopy(Base):
+    __tablename__ = "broadcast_copies"
+    broadcast_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    applied_text: Mapped[str] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

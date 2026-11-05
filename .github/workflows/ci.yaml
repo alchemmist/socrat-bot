@@ -39,7 +39,7 @@ jobs:
       - name: Install and run pytest
         run: |
           pip install -e '.[dev]' pytest httpx ruff
-          ruff check src/socrat_bot/commands.py tests/test_commands.py src/socrat_bot/escalation.py src/socrat_bot/delivery.py src/socrat_bot/db.py tests/test_escalation.py tests/conftest.py tests/test_migrations.py alembic/versions/0010_escalation.py alembic/versions/0011_delivery_ownership.py alembic/versions/0012_alerts_approval.py
+          ruff check src/socrat_bot/mailing.py alembic/versions/0013_broadcast_copies.py tests/test_mailing_edit.py src/socrat_bot/commands.py tests/test_commands.py src/socrat_bot/escalation.py src/socrat_bot/delivery.py src/socrat_bot/db.py tests/test_escalation.py tests/conftest.py tests/test_migrations.py alembic/versions/0010_escalation.py alembic/versions/0011_delivery_ownership.py alembic/versions/0012_alerts_approval.py
           ruff check --isolated --select E4,E7,E9,F src/socrat_bot/app.py src/socrat_bot/cards.py src/socrat_bot/logic.py src/socrat_bot/models.py alembic/env.py
           python -m compileall -q src tests alembic
           pytest -q

@@ -283,3 +283,15 @@ handlers still check their existing permissions.
 Transient Telegram menu failures do not block webhooks or delivery: a background
 startup task retries every 60 seconds until all managed scopes succeed. The task
 is cancelled on shutdown; failures are logged without exception text or tokens.
+
+### Editing sent mailings
+
+Owners can privately use `/mailing_edit UUID NEW_TEXT`, or reply to a delivery
+summary with `/mailing_edit NEW_TEXT`. `/mailing_edit` lists owned sent IDs.
+Text is plain Unicode (up to 4096 UTF-16 units). Only the original successfully
+sent copies with saved Telegram message IDs are edited; the current VPN audience
+is never consulted and no replacement messages are sent. Partial edit failures
+are reported per copy; repeat the same command to retry failed copies while
+skipping copies already updated. Deleted or otherwise uneditable messages remain
+failures. Mailings sent by older releases have no saved recipient message IDs:
+Telegram Bot API cannot reconstruct those copies, so they cannot be edited.

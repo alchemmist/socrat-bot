@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from socrat_bot.models import (
@@ -130,10 +130,14 @@ def claim_due_broadcasts(db: Session, now: datetime | None = None) -> list[Broad
             select(Broadcast).where(Broadcast.status == "scheduled", Broadcast.send_at.is_not(None), Broadcast.send_at <= moment)
         )
     )
+    claimed = []
     for row in rows:
-        row.status = "sending"
+        if db.execute(update(Broadcast).where(
+            Broadcast.id == row.id, Broadcast.status == "scheduled",
+        ).values(status="sending")).rowcount:
+            claimed.append(row)
     db.flush()
-    return rows
+    return claimed
 
 
 def audit(db: Session, actor: str, event: str, detail: dict) -> None:
@@ -356,7 +360,16 @@ async def _dispatch(db: Session, action: Action) -> dict:
         return await _silence(action.payload)
     if action.type == "broadcast.send":
         row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
-        return await deliver_broadcast(db, row)
+        if row is None or row.status not in {"preview", "draft"}:
+            return {"status": "unavailable", "sent": 0, "failed": []}
+        text, broadcast_id = row.text, row.id
+        recipients = [user.telegram_id for user in vpn_audience(db)]
+        row.status = "sending"
+        db.commit()  # Persist the action claim and release the transaction before HTTP.
+        result = await deliver_broadcast(text, recipients, broadcast_id)
+        row = db.get(Broadcast, broadcast_id)
+        row.status, row.sent, row.failed = "sent", result["sent"], result["failed"] + [{"accepted_untracked": item} for item in result.get("untracked", [])]
+        return result
     if action.type == "broadcast.cancel":
         row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
         if row:
@@ -389,25 +402,49 @@ async def _silence(payload: dict) -> dict:
         return {"status": "silenced", "silence": response.json()}
 
 
-async def deliver_broadcast(text: str, recipients: list[int]) -> dict:
+async def deliver_broadcast(text: str, recipients: list[int], broadcast_id=None) -> dict:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     pause = float(os.environ.get("BROADCAST_PAUSE_SECONDS", "0.4"))
     sent = 0
     failed: list[int] = []
     import asyncio
 
+    untracked = []
     async with httpx.AsyncClient(timeout=20) as client:
         for telegram_id in recipients:
-            response = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": telegram_id, "text": text},
-            )
-            if response.status_code == 200 and response.json().get("ok"):
-                sent += 1
+            try:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": telegram_id, "text": text},
+                )
+                data = response.json()
+            except Exception:
+                failed.append(telegram_id)
+                await asyncio.sleep(pause)
+                continue
+            message_id = (data.get("result") or {}).get("message_id")
+            if response.status_code == 200 and data.get("ok"):
+                sent += 1  # Telegram acceptance is independent of receipt persistence.
+                if broadcast_id is not None:
+                    try:
+                        if not message_id:
+                            raise ValueError("missing message ID")
+                        from .db import session
+                        from .models import BroadcastCopy
+                        with session() as receipt_db:
+                            receipt_db.add(BroadcastCopy(
+                                broadcast_id=broadcast_id, chat_id=telegram_id,
+                                message_id=message_id, applied_text=text,
+                            ))
+                    except Exception:
+                        untracked.append({"chat_id": telegram_id, "message_id": message_id})
             else:
                 failed.append(telegram_id)
             await asyncio.sleep(pause)
-    return {"status": "sent", "sent": sent, "failed": failed}
+    result = {"status": "sent", "sent": sent, "failed": failed}
+    if untracked:
+        result["untracked"] = untracked
+    return result
 
 
 async def _upgrade() -> dict:
