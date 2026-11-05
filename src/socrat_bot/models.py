@@ -5,6 +5,7 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     ForeignKey,
+    func,
     Index,
     Integer,
     String,
@@ -157,6 +158,7 @@ class CardDelivery(Base):
 
 class BroadcastCopy(Base):
     __tablename__ = "broadcast_copies"
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     broadcast_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     message_id: Mapped[int] = mapped_column(BigInteger)

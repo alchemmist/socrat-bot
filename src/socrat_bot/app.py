@@ -382,19 +382,9 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except ValueError:
             pass
     if broadcast_id is None or not value:
-        with session() as db:
-            rows = list(db.scalars(select(Broadcast).where(
-                Broadcast.chat_id == user.id, Broadcast.status == "sent",
-            ).limit(20)))
-            from .models import BroadcastCopy
-            tracked = set(db.scalars(select(BroadcastCopy.broadcast_id).where(
-                BroadcastCopy.broadcast_id.in_([row.id for row in rows]),
-            )))
-        listing = "\n".join(
-            f"{row.id} {'editable' if row.id in tracked else 'unavailable (no saved IDs)'} {row.text[:60]}"
-            for row in rows
-        )
-        await message.reply_text("Usage: /mailing_edit UUID NEW_TEXT; or reply to the delivery summary with /mailing_edit NEW_TEXT.\nOlder mailings without saved message IDs are unavailable.\n" + listing)
+        from .mailing_list import panel
+        text, markup = panel(user.id)
+        await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
         return
     result = await edit_mailing(broadcast_id, user.id, value)
     await message.reply_text(result[:4096])
@@ -549,6 +539,9 @@ async def _approve_alerts(query) -> None:
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
+        return
+    from .mailing_list import on_list_callback
+    if await on_list_callback(query):
         return
     if query.data.startswith("esc:"):
         try:

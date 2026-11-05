@@ -51,7 +51,7 @@ def test_sqlite_populated_upstream_desired_fence_upgrade_and_downgrade(tmp_path)
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0013_broadcast_copies"
+            == "0014_broadcast_copy_time"
         )
     engine.dispose()
 
@@ -92,4 +92,27 @@ def test_persistent_approval_backfills_current_and_historical_subscribers(tmp_pa
         ]
     subprocess.run(command + ["downgrade", "0011_delivery_ownership"], env=env, capture_output=True, check=True)
     subprocess.run(command + ["upgrade", "head"], env=env, capture_output=True, check=True)
+    engine.dispose()
+
+
+def test_populated_mailing_copy_timestamp_migration(tmp_path):
+    import uuid
+
+    url = f"sqlite+pysqlite:///{tmp_path / 'mailing_history_test.db'}"
+    env = dict(os.environ, DATABASE_URL=url, PYTHONPATH=str(Path("src").resolve()))
+    command = [sys.executable, "-m", "alembic"]
+    subprocess.run(command + ["upgrade", "0013_broadcast_copies"], env=env, capture_output=True, check=True)
+    engine = create_engine(url)
+    identity = uuid.uuid4().hex
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO broadcasts (id,text,status,sent,failed,chat_id) VALUES (:id,'old','sent',1,'[]',1)"), {"id": identity})
+        connection.execute(text("INSERT INTO broadcast_copies (broadcast_id,chat_id,message_id,applied_text) VALUES (:id,1,123,'old')"), {"id": identity})
+    for target in ("head", "0013_broadcast_copies", "head"):
+        action = "downgrade" if target == "0013_broadcast_copies" else "upgrade"
+        subprocess.run(command + [action, target], env=env, capture_output=True, check=True)
+        with engine.connect() as connection:
+            row = connection.execute(text("SELECT chat_id,message_id,applied_text FROM broadcast_copies")).one()
+            assert tuple(row) == (1, 123, "old")
+            if target == "head":
+                assert connection.scalar(text("SELECT sent_at FROM broadcast_copies")) is not None
     engine.dispose()

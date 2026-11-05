@@ -295,3 +295,11 @@ are reported per copy; repeat the same command to retry failed copies while
 skipping copies already updated. Deleted or otherwise uneditable messages remain
 failures. Mailings sent by older releases have no saved recipient message IDs:
 Telegram Bot API cannot reconstruct those copies, so they cannot be edited.
+
+`/mailing_edit` history shows only sent mailings with saved original copies, newest
+first by original receipt time (migration `0014_broadcast_copy_time`). The initial
+view contains at most the latest three, with escaped text previews in code blocks.
+**Show all** expands the history; large lists use bounded Previous/Next pages and
+**Latest 3** returns to the compact view. Buttons recheck owner/private-chat access.
+Long previews are visibly truncated rather than exceeding Telegram's message limit.
+Historical entries without saved IDs are hidden, not made editable by the UI.

@@ -298,7 +298,8 @@ def test_command_permissions_parsing_and_listing(store, application, monkeypatch
     message.text = '/mailing_edit'
     asyncio.run(application.app.on_mailing_edit(update, context))
     listing = message.reply_text.call_args.args[0]
-    assert str(store) in listing and 'unavailable (no saved IDs)' in listing
+    assert str(store) not in listing and 'No editable mailings yet' in listing
+    assert 'unavailable (no saved IDs)' not in listing
     assert 'PRIVATE OTHER OWNER' not in listing
     message.text = '/mailing hello'
     asyncio.run(application.app.on_mailing(update, context))
