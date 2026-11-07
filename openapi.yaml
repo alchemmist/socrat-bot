@@ -48,6 +48,20 @@ paths:
         Если получатели есть, но доставка никому не завершена, возвращается 502 с durable retry.
         При частичном успехе copies содержит завершённые копии.
         Поле chat_id в этом случае не выбирает получателей.
+        images работает с card, alert и singleton alerts, но не с обычным text (400).
+        До 3 inline PNG/JPEG, strict canonical base64, до 4 MiB decoded каждый (12 MiB суммарно).
+        URL не принимаются и не загружаются; скриншоты генерирует вызывающий процесс.
+        Фото отправляется multipart sendPhoto ответом на исходную текстовую карточку,
+        allow_sending_without_reply=false. Текст/кнопки/ID карточки не меняются.
+        attachments содержит status pending/sent по каждому получателю и слоту; успех текста
+        не означает успех фото. Ошибки фото сохраняют независимый durable retry после restart.
+        Изменение bytes в слоте редактирует прежнее фото (editMessageMedia); ошибка edit не вызывает resend.
+        Одинаковые bytes дедуплицируются. Отсутствующее/null/пустое images ничего не удаляет;
+        более короткий список сохраняет прежние оставшиеся слоты. Новая generation начинает без фото.
+        Фото получают только исходные admitted intents текущей generation и новые intents эскалации;
+        перед HTTP проверяется alerts_enabled. Изменение настроек не создаёт backlog.
+        Lease finite, ownership fenced; Telegram accepted-but-untracked может дать повтор после timeout,
+        exactly-once не гарантируется. Payload images не возвращается в list API.
         Повтор того же алерта правит уже отправленную карточку. Resolved дописывается
         в ту же строку, что и название. Следующее срабатывание после закрытия создаёт новое сообщение.
       requestBody:
@@ -420,9 +434,33 @@ components:
           type: array
           items:
             type: object
+        images:
+          type: array
+          nullable: true
+          maxItems: 3
+          items:
+            $ref: "#/components/schemas/AlertImage"
         parse_mode:
           type: string
           enum: [HTML]
+    AlertImage:
+      type: object
+      additionalProperties: false
+      required: [data_base64, mime_type]
+      properties:
+        data_base64:
+          type: string
+          format: byte
+          maxLength: 5592408
+          description: Canonical strict base64; decoded limit 4 MiB, matching PNG/JPEG signature required.
+        mime_type:
+          type: string
+          enum: [image/png, image/jpeg]
+        filename:
+          type: string
+          nullable: true
+          maxLength: 100
+          pattern: '^[A-Za-z0-9_.-]{1,100}$'
     Alert:
       type: object
       properties:
@@ -546,6 +584,28 @@ components:
     SentMessage:
       type: object
       properties:
+        attachments:
+          type: array
+          description: Present when retained images exist; text copies do not imply photo success. Slots are zero-based. Pending includes failed/disabled recipients; no bytes are exposed.
+          items:
+            type: object
+            required: [chat_id, slot, status]
+            properties:
+              chat_id:
+                type: integer
+                format: int64
+              slot:
+                type: integer
+                minimum: 0
+                maximum: 2
+              status:
+                type: string
+                enum: [pending, sent]
+              message_id:
+                type: integer
+                nullable: true
+                description: Existing photo ID, even if a newer image revision is pending.
+
         id:
           type: integer
           format: int64

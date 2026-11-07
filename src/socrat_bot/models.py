@@ -8,6 +8,7 @@ from sqlalchemy import (
     func,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -164,3 +165,26 @@ class BroadcastCopy(Base):
     message_id: Mapped[int] = mapped_column(BigInteger)
     applied_text: Mapped[str] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AlertImage(Base):
+    __tablename__ = "alert_images"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    mime_type: Mapped[str] = mapped_column(String(32))
+    filename: Mapped[str] = mapped_column(String(100))
+
+
+class ImageDelivery(Base):
+    __tablename__ = "image_deliveries"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reply_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

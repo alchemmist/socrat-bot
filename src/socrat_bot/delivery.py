@@ -29,10 +29,13 @@ from socrat_bot.logic import create_action
 from socrat_bot.models import AlertOutbox, CardDelivery, Incident, TelegramCard
 
 
-def submit_card(card, custom_actions=None):
+def submit_card(card, custom_actions=None, images=None):
     with session() as db:
         recipients = route(db, card.key, card.firing)
         incident = db.get(Incident, card.key)
+        from socrat_bot.media import publish
+
+        publish(db, incident, images)
         card = replace(card, status=incident.status)
         jobs = []
         for chat_id in recipients:

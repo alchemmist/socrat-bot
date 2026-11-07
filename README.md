@@ -303,3 +303,58 @@ view contains at most the latest three, with escaped text previews in code block
 **Latest 3** returns to the compact view. Buttons recheck owner/private-chat access.
 Long previews are visibly truncated rather than exceeding Telegram's message limit.
 Historical entries without saved IDs are hidden, not made editable by the UI.
+
+### Optional alert images (internal API)
+
+The caller generates/selects screenshots; the bot does not render Grafana, accept
+image URLs, fetch screenshots, or need Grafana/browser credentials. Attach to
+`card`, `alert`, or a singleton `alerts` request (not a plain text message):
+
+```python
+import base64
+import requests
+
+requests.post("http://socrat-bot:8080/v1/messages", headers={
+    "X-Internal-Token": internal_token,
+}, json={
+    "chat_id": 123,
+    "card": {"key": "disk/example", "title": "Disk almost full"},
+    "images": [{
+        "data_base64": base64.b64encode(png_bytes).decode("ascii"),
+        "mime_type": "image/png",
+        "filename": "grafana.png",
+    }],
+})
+```
+
+* At most three images, 4 MiB decoded each / 12 MiB total; canonical strict
+  base64 and PNG/JPEG signatures are checked. Only `image/png` and `image/jpeg`
+  are accepted. Optional filenames are at most 100 ASCII letters/digits/`_.-`.
+  Unknown image fields (including URLs) are rejected. This is signature checking,
+  not full image decoding; Telegram may still reject malformed/unsupported images.
+* Each image is a **reply to the original text alert**, not a caption replacement.
+  Text IDs, full text, Mute/Escalate, SPI, notes and resolution remain intact.
+  `allow_sending_without_reply=false` prevents orphan sends if the card is gone.
+* `attachments` in the response reports zero-based `slot`, `chat_id`,
+  `status: pending|sent`, and nullable photo `message_id`. Text success does not
+  imply image success. Rejected photos stay pending for independent durable retry;
+  they do not roll back text. If all text delivery is pending, the existing 502 is
+  retained, with attachment status in its detail when images exist.
+* Same bytes at the same slot are deduplicated. Changed bytes update the existing
+  photo using `editMessageMedia`, keeping its ID; edit failure never falls back to
+  another photo. Omitted, null or empty `images` means **no image mutation**, not
+  deletion. Shorter lists leave the remaining existing slots intact. There is no
+  delete-images operation. A new incident generation starts with no retained images.
+* Desired bytes and per-recipient receipts survive restart. The original admitted
+  audience is reused; escalation's newly admitted recipients get retained images.
+  Settings changes alone do not admit recipients or create an image backlog.
+  `alerts_enabled` is rechecked immediately before each HTTP operation.
+* Media uses the same per-card finite CAS lease as text/SPI dispatch, but has its
+  own retry worker so photo outages do not stall the text retry loop. No network
+  runs inside a transaction. A send already in flight cannot be recalled by an
+  unsubscribe/generation change; its reply ID is pinned to the old card, never
+  redirected to a newer generation. Telegram acceptance followed by a lost response
+  or failed receipt commit is ambiguous: lease expiry/restart can produce a duplicate
+  photo. **Exactly-once is not promised.** A known photo is always edited, never resent.
+* Image bytes are persisted in the bot database (including backups); not exposed by
+  list APIs or logged. Retention/garbage collection is not currently automatic.

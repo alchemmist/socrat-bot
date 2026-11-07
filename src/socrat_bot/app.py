@@ -6,11 +6,15 @@ from datetime import timezone, datetime
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.exception_handlers import request_validation_exception_handler
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+from socrat_bot import media
 from socrat_bot.cards import (
     Card,
     Link,
@@ -98,6 +102,7 @@ class OutMessage(BaseModel):
     card: CardIn | None = None
     actions: list[dict] = Field(default_factory=list)
     parse_mode: str | None = None
+    images: list[media.ImageIn] | None = Field(default=None, max_length=3)
 
 
 class PatchMessage(BaseModel):
@@ -803,9 +808,12 @@ async def lifespan(app: FastAPI):
         command_ticker = asyncio.create_task(command_menu_loop(ptb.bot, menu_owners))
     ticker = asyncio.create_task(_broadcast_loop())
     escalation_ticker = asyncio.create_task(outbox_loop())
+    media_ticker = asyncio.create_task(media.outbox_loop())
     yield
     ticker.cancel()
     escalation_ticker.cancel()
+    media_ticker.cancel()
+    await asyncio.gather(media_ticker, return_exceptions=True)
     if command_ticker is not None:
         command_ticker.cancel()
         await asyncio.gather(command_ticker, return_exceptions=True)
@@ -854,13 +862,19 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
         card = card_from_request(body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if body.images and card is None:
+        raise HTTPException(status_code=400, detail="images require card, alert, or singleton alerts")
     if card is not None:
-        recipients, jobs = await asyncio.to_thread(submit_card, card, body.actions)
+        recipients, jobs = await asyncio.to_thread(submit_card, card, body.actions, body.images)
         await dispatch_jobs(jobs)
+        await media.drain(key=card.key)
+        attachments = await asyncio.to_thread(media.status, card.key, recipients)
         copies = await asyncio.to_thread(delivered_copies, card.key, recipients, jobs)
         if recipients and not copies:
-            raise HTTPException(status_code=502, detail="delivery pending; durable retry retained")
+            raise HTTPException(status_code=502, detail={"message": "delivery pending; durable retry retained", "attachments": attachments} if attachments else "delivery pending; durable retry retained")
         episode_meta = {"episode": card.key.rsplit("/spi/", 1)[1], "immutable_key": True} if "/spi/" in card.key else {}
+        if attachments:
+            episode_meta["attachments"] = attachments
         if not copies:
             return {"key": card.key, "copies": [], **episode_meta}
         chosen = next((c for c in copies if c["chat_id"] == body.chat_id), copies[0])
@@ -1151,3 +1165,13 @@ async def on_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "You are unsubscribed from alerts. You can subscribe again at any time.",
         reply_markup=markup,
     )
+
+
+@api.exception_handler(RequestValidationError)
+async def safe_validation_error(request: Request, exc: RequestValidationError):
+    # Preserve legacy validation responses unless an image-bearing body is involved.
+    if not (isinstance(exc.body, dict) and "images" in exc.body):
+        return await request_validation_exception_handler(request, exc)
+    # FastAPI otherwise echoes base64 bytes and arbitrary metadata in validation errors.
+    errors = [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
