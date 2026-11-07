@@ -8,6 +8,7 @@ import json
 import os
 import re
 import uuid
+from contextlib import suppress
 from datetime import timedelta
 from typing import Literal
 
@@ -26,6 +27,9 @@ from socrat_bot.models import (
     User,
     utcnow,
 )
+
+HTTP_DEADLINE = 20
+HEARTBEAT_INTERVAL = 5
 
 MAX_BYTES = 4 * 1024 * 1024
 
@@ -80,7 +84,7 @@ def publish(db, incident, images):
         )
 
 
-def _claim(key=None):
+def _claim(key=None, generation=None):
     from socrat_bot.escalation import insert_once
 
     now = utcnow()
@@ -90,6 +94,7 @@ def _claim(key=None):
             select(AlertImage, CardDelivery)
             .options(defer(AlertImage.data))
             .where(AlertImage.key == key if key is not None else True)
+            .where(AlertImage.generation == generation if generation is not None else True)
             .join(
                 CardDelivery,
                 (CardDelivery.key == AlertImage.key)
@@ -148,7 +153,38 @@ def _claim(key=None):
             ).rowcount
             if not won:
                 continue
-            # Snapshot immutable original reply ID, never consult a newer card after HTTP.
+            # Refresh all work fields after ownership, never reuse deferred/cached
+            # metadata or a receipt observed before a competing completion.
+            fresh = db.execute(
+                select(AlertImage, ImageDelivery, TelegramCard, CardDelivery, User)
+                .join(ImageDelivery, (ImageDelivery.key == AlertImage.key)
+                      & (ImageDelivery.generation == AlertImage.generation)
+                      & (ImageDelivery.slot == AlertImage.slot))
+                .join(TelegramCard, (TelegramCard.key == AlertImage.key)
+                      & (TelegramCard.chat_id == ImageDelivery.chat_id))
+                .join(CardDelivery, (CardDelivery.key == AlertImage.key)
+                      & (CardDelivery.chat_id == ImageDelivery.chat_id))
+                .join(User, User.telegram_id == ImageDelivery.chat_id)
+                .join(Incident, (Incident.key == AlertImage.key)
+                      & (Incident.generation == AlertImage.generation))
+                .where(AlertImage.key == identity[0],
+                       AlertImage.generation == identity[1],
+                       AlertImage.slot == identity[3], ImageDelivery.chat_id == identity[2])
+                .execution_options(populate_existing=True)
+            ).first()
+            if fresh:
+                image, receipt, card, state, person = fresh
+            if (not fresh or not person.alerts_enabled
+                or state.generation != identity[1]
+                or state.message_generation != identity[1]
+                or card.generation != identity[1] or not card.message_id
+                or receipt.revision == image.revision
+                or receipt.available_at.replace(tzinfo=now.tzinfo) > now):
+                db.execute(update(CardDelivery).where(
+                    CardDelivery.key == identity[0], CardDelivery.chat_id == identity[2],
+                    CardDelivery.lease_owner == owner
+                ).values(lease_owner=None, lease_until=None))
+                continue
             return {
                 "identity": identity,
                 "owner": owner,
@@ -198,8 +234,15 @@ def _finish(work, message_id):
         state.lease_owner = state.lease_until = None
 
 
-async def drain_one(*, key=None):
-    work = await asyncio.to_thread(_claim, key)
+def _renew(work):
+    from socrat_bot.escalation import renew_lease
+
+    return renew_lease({"key": work["identity"][0],
+                        "chat_id": work["identity"][2], "_owner": str(work["owner"])})
+
+
+async def drain_one(*, key=None, generation=None):
+    work = await asyncio.to_thread(_claim, key, generation)
     if not work:
         return False
     if not await asyncio.to_thread(_eligible, work):
@@ -219,8 +262,16 @@ async def drain_one(*, key=None):
             {"message_id": work["reply"], "allow_sending_without_reply": False}
         )
     message_id = None
+
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            if not await asyncio.to_thread(_renew, work):
+                return
+
+    ticker = asyncio.create_task(heartbeat())
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with asyncio.timeout(HTTP_DEADLINE), httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
                 f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{method}",
                 data=fields,
@@ -236,17 +287,21 @@ async def drain_one(*, key=None):
     except Exception:  # noqa: BLE001 - ambiguous acceptance retains finite lease
         # Unknown acceptance: retain finite lease; no exactly-once claim.
         return True
+    finally:
+        ticker.cancel()
+        with suppress(asyncio.CancelledError):
+            await ticker
     await asyncio.to_thread(_finish, work, message_id)
     return True
 
 
-async def drain(limit=12, *, key=None):
+async def drain(limit=12, *, key=None, generation=None):
     for _ in range(limit):
-        if not await drain_one(key=key):
+        if not await drain_one(key=key, generation=generation):
             break
 
 
-def status(key, recipients):
+def status(key, recipients, snapshot=None):
     with session() as db:
         incident = db.get(Incident, key)
         images = db.scalars(
@@ -254,18 +309,22 @@ def status(key, recipients):
             .options(defer(AlertImage.data))
             .where(AlertImage.key == key, AlertImage.generation == incident.generation)
         ).all()
+        desired = snapshot["revisions"] if snapshot else {i.slot: i.revision for i in images}
+        generation = snapshot["generation"] if snapshot else incident.generation
+        current = {i.slot: i.revision for i in images}
         result = []
         for chat in recipients:
-            for image in images:
+            for slot, revision in desired.items():
                 receipt = db.get(
-                    ImageDelivery, (key, incident.generation, chat, image.slot)
+                    ImageDelivery, (key, generation, chat, slot)
                 )
-                sent = bool(receipt and receipt.revision == image.revision)
+                sent = bool(receipt and receipt.revision == revision)
+                superseded = incident.generation != generation or current.get(slot) != revision
                 result.append(
                     {
                         "chat_id": chat,
-                        "slot": image.slot,
-                        "status": "sent" if sent else "pending",
+                        "slot": slot,
+                        "status": "superseded" if superseded else "sent" if sent else "pending",
                         "message_id": receipt.message_id if receipt else None,
                     }
                 )

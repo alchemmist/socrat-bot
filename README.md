@@ -358,3 +358,17 @@ requests.post("http://socrat-bot:8080/v1/messages", headers={
   photo. **Exactly-once is not promised.** A known photo is always edited, never resent.
 * Image bytes are persisted in the bot database (including backups); not exposed by
   list APIs or logged. Retention/garbage collection is not currently automatic.
+
+Image response statuses describe the generation and submitted slot revisions captured
+in the submit transaction: `sent` means that exact revision has a durable receipt;
+`pending` means it awaits delivery; `superseded` means the generation or desired
+revision has since changed and that snapshot is no longer deliverable. Photo IDs
+may refer to an older receipt, not proof of delivery of a pending revision.
+Omitted, null and empty images preserve stored images and never synchronously drain
+media. Provided images trigger at most one synchronous attempt with a two-second
+budget, scoped to the submitted generation; durable retries handle the remainder.
+The `submit_card` Python helper retains its two-tuple default; `metadata=True`
+returns `(recipients, jobs, snapshot)` for generation-bound reporting.
+Media renews its owner-fenced 60-second lease every five seconds and enforces a
+20-second total HTTP deadline. Ambiguous failures/cancellation retain a finite
+lease; lost responses can still cause duplicate Telegram photos on retry.

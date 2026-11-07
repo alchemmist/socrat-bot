@@ -29,7 +29,7 @@ from socrat_bot.logic import create_action
 from socrat_bot.models import AlertOutbox, CardDelivery, Incident, TelegramCard
 
 
-def submit_card(card, custom_actions=None, images=None):
+def submit_card(card, custom_actions=None, images=None, *, metadata=False):
     with session() as db:
         recipients = route(db, card.key, card.firing)
         incident = db.get(Incident, card.key)
@@ -73,6 +73,13 @@ def submit_card(card, custom_actions=None, images=None):
                 )
             state.buttons = specs
             jobs.append(enqueue_card(db, incident, chat_id, text=text))
+        if metadata:
+            import hashlib
+
+            snapshot = {"generation": incident.generation, "revisions": {
+                slot: hashlib.sha256(image.decoded()).hexdigest()
+                for slot, image in enumerate(images or [])}}
+            return recipients, jobs, snapshot
         return recipients, jobs
 
 

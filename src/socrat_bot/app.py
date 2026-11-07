@@ -865,10 +865,17 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
     if body.images and card is None:
         raise HTTPException(status_code=400, detail="images require card, alert, or singleton alerts")
     if card is not None:
-        recipients, jobs = await asyncio.to_thread(submit_card, card, body.actions, body.images)
+        recipients, jobs, snapshot = await asyncio.to_thread(
+            submit_card, card, body.actions, body.images, metadata=True
+        )
         await dispatch_jobs(jobs)
-        await media.drain(key=card.key)
-        attachments = await asyncio.to_thread(media.status, card.key, recipients)
+        if body.images:
+            try:
+                async with asyncio.timeout(2):
+                    await media.drain(limit=1, key=card.key, generation=snapshot["generation"])
+            except TimeoutError:
+                pass
+        attachments = await asyncio.to_thread(media.status, card.key, recipients, snapshot)
         copies = await asyncio.to_thread(delivered_copies, card.key, recipients, jobs)
         if recipients and not copies:
             raise HTTPException(status_code=502, detail={"message": "delivery pending; durable retry retained", "attachments": attachments} if attachments else "delivery pending; durable retry retained")

@@ -65,7 +65,7 @@ images работает с card, alert и singleton alerts, но не с обы�
 URL не принимаются и не загружаются; скриншоты генерирует вызывающий процесс.
 Фото отправляется multipart sendPhoto ответом на исходную текстовую карточку,
 allow_sending_without_reply=false. Текст/кнопки/ID карточки не меняются.
-attachments содержит status pending/sent по каждому получателю и слоту; успех текста
+attachments содержит status pending/sent/superseded по каждому получателю и слоту; успех текста
 не означает успех фото. Ошибки фото сохраняют независимый durable retry после restart.
 Изменение bytes в слоте редактирует прежнее фото (editMessageMedia); ошибка edit не вызывает resend.
 Одинаковые bytes дедуплицируются. Отсутствующее/null/пустое images ничего не удаляет;

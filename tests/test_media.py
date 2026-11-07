@@ -324,3 +324,136 @@ def test_validation_bounds_and_optional_compatibility():
         message = app.OutMessage(chat_id=1, text="legacy", **optional)
         assert not message.images
         assert app.card_from_request(message) is None
+
+
+def test_postlease_refresh_barriers(request, monkeypatch):
+    """Two connections: pause claimant before its lease UPDATE, publish/finish."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+
+    from sqlalchemy import event
+
+    from socrat_bot import db as database
+
+    if request.getfixturevalue("store") != "postgres":
+        pytest.skip("requires PostgreSQL READ COMMITTED")
+    prepare()
+    # Seed pending receipt before installing the barrier.
+    old = media._claim()
+    media._finish(old, None)
+    with session() as db:
+        db.scalar(select(ImageDelivery)).available_at = utcnow() - timedelta(seconds=1)
+    reached, resume = Event(), Event()
+    armed = [True]
+
+    def pause(conn, cursor, statement, parameters, context, executemany):
+        if (armed[0] and current_thread().name.startswith("claimant")
+                and statement.startswith("UPDATE card_deliveries")):
+            armed[0] = False
+            reached.set()
+            assert resume.wait(10)
+
+    event.listen(database._engine, "before_cursor_execute", pause)
+    try:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="claimant") as pool:
+            future = pool.submit(media._claim)
+            assert reached.wait(10)
+            submit_card(Card(key="disk", title="Disk"),
+                        images=[media.ImageIn(**image(PNG + b"B"))])
+            resume.set()
+            work = future.result(10)
+        assert work["data"] == PNG + b"B"
+        assert work["revision"] == hashlib.sha256(work["data"]).hexdigest()
+        media._finish(work, 90)
+        # A -> B -> A must require an edit, not suppress A as already delivered.
+        submit_card(Card(key="disk", title="Disk"), images=[media.ImageIn(**image())])
+        a = media._claim()
+        assert a and a["data"] == PNG and a["photo"] == 90
+        media._finish(a, None)
+        with session() as db:
+            db.scalar(select(ImageDelivery)).available_at = utcnow() - timedelta(seconds=1)
+        # Claimant read pending, then another connection durably finishes A.
+        reached.clear()
+        resume.clear()
+        armed[0] = True
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="claimant") as pool:
+            future = pool.submit(media._claim)
+            assert reached.wait(10)
+            winner = media._claim()
+            assert winner
+            media._finish(winner, 90)
+            resume.set()
+            assert future.result(10) is None
+        with session() as db:
+            assert db.get(CardDelivery, ("disk", 1)).lease_owner is None
+    finally:
+        resume.set()
+        event.remove(database._engine, "before_cursor_execute", pause)
+
+
+def test_progress_transport_deadline_and_heartbeat(monkeypatch):
+    prepare()
+    monkeypatch.setattr(media, "HTTP_DEADLINE", .12)
+    monkeypatch.setattr(media, "HEARTBEAT_INTERVAL", .02)
+    renewals = []
+    renew = media._renew
+
+    def counted(work):
+        renewals.append(work["owner"])
+        return renew(work)
+
+    monkeypatch.setattr(media, "_renew", counted)
+
+    async def handle(request):
+        while True:  # progressing transport: inactivity timeout cannot bound this
+            await asyncio.sleep(.01)
+            assert await asyncio.to_thread(media._claim) is None
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: REAL_CLIENT(
+        transport=httpx.MockTransport(handle), **kw))
+    asyncio.run(media.drain_one())
+    assert len(renewals) >= 2
+    count = len(renewals)
+    with session() as db:
+        state = db.get(CardDelivery, ("disk", 1))
+        assert state.lease_owner
+        assert utcnow() < state.lease_until.replace(tzinfo=utcnow().tzinfo) < utcnow() + timedelta(seconds=61)
+    assert media._claim() is None
+    assert len(renewals) == count
+
+
+def test_submission_snapshot_superseded():
+    prepare()
+    recipients, _jobs, snapshot = submit_card(
+        Card(key="disk", title="Disk"), images=[media.ImageIn(**image())], metadata=True)
+    submit_card(Card(key="disk", title="Disk"), images=[media.ImageIn(**image(PNG + b"B"))])
+    assert media.status("disk", recipients, snapshot)[0]["status"] == "superseded"
+    with session() as db:
+        db.get(Incident, "disk").generation = 2
+    assert media.status("disk", recipients, snapshot)[0]["status"] == "superseded"
+    assert media._claim("disk", snapshot["generation"]) is None
+
+
+def test_text_only_never_drains_media(monkeypatch):
+    prepare()
+    monkeypatch.setenv("INTERNAL_TOKEN", "secret")
+    transport(monkeypatch)
+
+    async def forbidden(**kwargs):
+        pytest.fail("text-only request drained retained media")
+
+    monkeypatch.setattr(media, "drain", forbidden)
+
+    async def run():
+        async with REAL_CLIENT(transport=httpx.ASGITransport(app=app.api),
+                               base_url="http://test") as client:
+            for optional in [{}, {"images": None}, {"images": []}]:
+                response = await client.post("/v1/messages",
+                    headers={"x-internal-token": "secret"}, json={
+                        "chat_id": 1, "card": {"key": "disk", "title": "Disk"},
+                        **optional})
+                assert response.status_code == 200
+                assert "attachments" not in response.json()
+
+    asyncio.run(run())
