@@ -8,7 +8,6 @@ import json
 import os
 import re
 import uuid
-from contextlib import suppress
 from datetime import timedelta
 from typing import Literal
 
@@ -289,8 +288,7 @@ async def drain_one(*, key=None, generation=None):
         return True
     finally:
         ticker.cancel()
-        with suppress(asyncio.CancelledError):
-            await ticker
+        await asyncio.gather(ticker, return_exceptions=True)
     await asyncio.to_thread(_finish, work, message_id)
     return True
 

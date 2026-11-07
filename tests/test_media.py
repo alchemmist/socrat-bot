@@ -457,3 +457,23 @@ def test_text_only_never_drains_media(monkeypatch):
                 assert "attachments" not in response.json()
 
     asyncio.run(run())
+
+
+def test_heartbeat_failure_does_not_discard_confirmed_photo(monkeypatch):
+    prepare()
+    monkeypatch.setattr(media, "HEARTBEAT_INTERVAL", .001)
+
+    def broken_renew(work):
+        raise RuntimeError("transient heartbeat failure")
+
+    async def handle(request):
+        await asyncio.sleep(.02)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 90}})
+
+    monkeypatch.setattr(media, "_renew", broken_renew)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: REAL_CLIENT(
+        transport=httpx.MockTransport(handle), **kw))
+    assert asyncio.run(media.drain_one())
+    with session() as db:
+        assert db.get(ImageDelivery, ("disk", 1, 1, 0)).message_id == 90
+        assert db.get(CardDelivery, ("disk", 1)).lease_owner is None
