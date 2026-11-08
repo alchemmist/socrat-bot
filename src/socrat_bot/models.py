@@ -77,6 +77,7 @@ class Audit(Base):
 
 
 class Broadcast(Base):
+    entities: Mapped[list] = mapped_column(JSONType, default=list, server_default="[]")
     __tablename__ = "broadcasts"
     edit_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
     edit_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -158,6 +159,7 @@ class CardDelivery(Base):
 
 
 class BroadcastCopy(Base):
+    applied_entities: Mapped[list] = mapped_column(JSONType, default=list, server_default="[]")
     __tablename__ = "broadcast_copies"
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     broadcast_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)

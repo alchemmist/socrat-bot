@@ -337,7 +337,12 @@ async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if message.chat_id != user.id:
         await message.reply_text("This command is available in private chat only.")
         return
-    text = " ".join(context.args or []).strip()
+    from .entities import command_body
+    try:
+        text, entities = command_body(message)
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return
     with session() as db:
         if not is_owner(db, user.id):
             await message.reply_text("This command is available to the owner only.")
@@ -345,8 +350,10 @@ async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if not text:
             await message.reply_text("Usage: /mailing message text")
             return
-        row = begin_mailing(db, user.id, text)
+        row = begin_mailing(db, user.id, text, entities)
         broadcast_id = row.id
+    from telegram import MessageEntity
+    await message.reply_text(text, entities=[MessageEntity.de_json(item, getattr(context, "bot", None)) for item in entities], parse_mode=None)
     response = await message.reply_text(
         "Pick a day. Time is Europe/Moscow.",
         reply_markup=_date_keyboard(broadcast_id, datetime.now(broadcast_zone())),
@@ -379,6 +386,7 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 Broadcast.message_id == message.reply_to_message.message_id,
                 Broadcast.status == "sent",
             ))
+    body_tokens = 1 if broadcast_id is not None else 2
     if broadcast_id is None and value:
         parts = value.split(maxsplit=1)
         try:
@@ -391,7 +399,13 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text, markup = panel(user.id)
         await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
         return
-    result = await edit_mailing(broadcast_id, user.id, value)
+    from .entities import command_body
+    try:
+        value, entities = command_body(message, body_tokens)
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return
+    result = await edit_mailing(broadcast_id, user.id, value, entities)
     await message.reply_text(result[:4096])
 
 

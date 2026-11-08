@@ -87,8 +87,9 @@ def mark_vpn(db: Session, telegram_id: int, username: str | None = None) -> User
     return user
 
 
-def begin_mailing(db: Session, chat_id: int, text: str) -> Broadcast:
-    row = Broadcast(text=text, status="choosing", chat_id=chat_id)
+def begin_mailing(db: Session, chat_id: int, text: str, entities=None) -> Broadcast:
+    from .entities import normalize
+    row = Broadcast(text=text, entities=normalize(text, entities), status="choosing", chat_id=chat_id)
     db.add(row)
     db.flush()
     return row
@@ -403,6 +404,15 @@ async def _silence(payload: dict) -> dict:
 
 
 async def deliver_broadcast(text: str, recipients: list[int], broadcast_id=None) -> dict:
+    from .entities import normalize
+    entities = []
+    if broadcast_id is not None:
+        from .db import session as load_session
+        with load_session() as db:
+            stored = db.get(Broadcast, broadcast_id)
+            if stored is not None:
+                entities = stored.entities or []
+    entities = normalize(text, entities)
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     pause = float(os.environ.get("BROADCAST_PAUSE_SECONDS", "0.4"))
     sent = 0
@@ -415,7 +425,7 @@ async def deliver_broadcast(text: str, recipients: list[int], broadcast_id=None)
             try:
                 response = await client.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": telegram_id, "text": text},
+                    json={"chat_id": telegram_id, "text": text, **({"entities": entities} if entities else {})},
                 )
                 data = response.json()
             except Exception:
@@ -429,12 +439,12 @@ async def deliver_broadcast(text: str, recipients: list[int], broadcast_id=None)
                     try:
                         if not message_id:
                             raise ValueError("missing message ID")
-                        from .db import session
+                        from .db import session as receipt_session
                         from .models import BroadcastCopy
-                        with session() as receipt_db:
+                        with receipt_session() as receipt_db:
                             receipt_db.add(BroadcastCopy(
                                 broadcast_id=broadcast_id, chat_id=telegram_id,
-                                message_id=message_id, applied_text=text,
+                                message_id=message_id, applied_text=text, applied_entities=entities,
                             ))
                     except Exception:
                         untracked.append({"chat_id": telegram_id, "message_id": message_id})

@@ -51,7 +51,7 @@ def test_sqlite_populated_upstream_desired_fence_upgrade_and_downgrade(tmp_path)
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0015_alert_images"
+            == "0016_mailing_entities"
         )
     engine.dispose()
 
@@ -95,10 +95,21 @@ def test_persistent_approval_backfills_current_and_historical_subscribers(tmp_pa
     engine.dispose()
 
 
-def test_populated_mailing_copy_timestamp_migration(tmp_path):
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_populated_mailing_copy_timestamp_migration(tmp_path, backend):
     import uuid
 
     url = f"sqlite+pysqlite:///{tmp_path / 'mailing_history_test.db'}"
+    if backend == "postgres":
+        url = os.environ.get("TEST_POSTGRES_URL")
+        if not url:
+            pytest.skip("requires disposable PostgreSQL")
+        assert "test" in url
+        cleanup = create_engine(url)
+        Base.metadata.drop_all(cleanup)
+        with cleanup.begin() as connection:
+            connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        cleanup.dispose()
     env = dict(os.environ, DATABASE_URL=url, PYTHONPATH=str(Path("src").resolve()))
     command = [sys.executable, "-m", "alembic"]
     subprocess.run(command + ["upgrade", "0013_broadcast_copies"], env=env, capture_output=True, check=True)
@@ -115,4 +126,6 @@ def test_populated_mailing_copy_timestamp_migration(tmp_path):
             assert tuple(row) == (1, 123, "old")
             if target == "head":
                 assert connection.scalar(text("SELECT sent_at FROM broadcast_copies")) is not None
+                assert str(connection.scalar(text("SELECT entities FROM broadcasts"))) == "[]"
+                assert str(connection.scalar(text("SELECT applied_entities FROM broadcast_copies"))) == "[]"
     engine.dispose()

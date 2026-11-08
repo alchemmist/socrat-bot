@@ -17,9 +17,12 @@ def failure(data):
     return description.replace(token, "[redacted]")[:300] if token else description[:300]
 
 
-async def edit_mailing(broadcast_id, owner_id, text):
-    if not text or len(text.encode("utf-16-le")) // 2 > 4096:
-        return "Text must contain 1–4096 UTF-16 units."
+async def edit_mailing(broadcast_id, owner_id, text, entities=None):
+    from .entities import normalize
+    try:
+        entities = normalize(text, entities)
+    except ValueError as exc:
+        return str(exc)
     token = str(uuid.uuid4())
     now = datetime.now(UTC)
     with session() as db:
@@ -34,6 +37,7 @@ async def edit_mailing(broadcast_id, owner_id, text):
         row = db.get(Broadcast, broadcast_id)
         if copies:
             row.text = text
+            row.entities = entities
     updated = skipped = 0
     errors = []
     try:
@@ -46,14 +50,14 @@ async def edit_mailing(broadcast_id, owner_id, text):
                     ).values(edit_until=datetime.now(UTC) + timedelta(minutes=5))).rowcount
                 if not owned:
                     return "Edit lease lost; retry to reconcile remaining copies."
-                if copy.applied_text == text:
+                if copy.applied_text == text and (copy.applied_entities or []) == entities:
                     skipped += 1
                     continue
                 error = None
                 try:
                     response = await client.post(
                         f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/editMessageText",
-                        json={"chat_id": copy.chat_id, "message_id": copy.message_id, "text": text},
+                        json={"chat_id": copy.chat_id, "message_id": copy.message_id, "text": text, "entities": entities},
                     )
                     data = response.json()
                     if not (response.status_code == 200 and data.get("ok")):
@@ -72,6 +76,7 @@ async def edit_mailing(broadcast_id, owner_id, text):
                     stored.error = error
                     if error is None:
                         stored.applied_text = text
+                        stored.applied_entities = entities
                 if error:
                     errors.append(f"{copy.chat_id}: {error}")
                 else:

@@ -200,12 +200,14 @@ def application(store, monkeypatch):
 def test_immediate_callback_receipts_and_repeat(store, application):
     with database.session() as db:
         db.get(Broadcast, store).status = 'choosing'
+        db.get(Broadcast, store).entities = [{'type': 'bold', 'offset': 0, 'length': 3}]
     query = application.query
     async def simultaneous():
         await asyncio.gather(*(application.app._on_mailing_callback(query, f'm:n:{store}') for _ in range(2)))
 
     asyncio.run(simultaneous())
     assert len(application.calls) == 2
+    assert all(payload['entities'] == [{'type': 'bold', 'offset': 0, 'length': 3}] for _, payload in application.calls)
     with database.session() as db:
         row = db.get(Broadcast, store)
         assert row.status == 'sent' and row.sent == 1 and row.failed == [11]
@@ -219,6 +221,7 @@ def test_scheduled_loop_receipts(store, application, monkeypatch):
     with database.session() as db:
         row = db.get(Broadcast, store)
         row.status = 'scheduled'
+        row.entities = [{'type': 'italic', 'offset': 0, 'length': 3}]
         row.send_at = datetime.now(UTC) - timedelta(minutes=1)
     real_sleep = asyncio.sleep
     ticks = 0
@@ -237,6 +240,8 @@ def test_scheduled_loop_receipts(store, application, monkeypatch):
     with database.session() as db:
         assert db.get(Broadcast, store).sent == 1
         assert db.get(BroadcastCopy, (store, 10)).message_id == 90
+        assert db.get(BroadcastCopy, (store, 10)).applied_entities == [{'type': 'italic', 'offset': 0, 'length': 3}]
+    assert all(payload['entities'] == [{'type': 'italic', 'offset': 0, 'length': 3}] for _, payload in application.calls)
 
 
 def test_legacy_callback_receipts(store, application):
@@ -244,6 +249,7 @@ def test_legacy_callback_receipts(store, application):
 
     with database.session() as db:
         db.get(Broadcast, store).status = 'preview'
+        db.get(Broadcast, store).entities = [{'type': 'underline', 'offset': 0, 'length': 3}]
         action = create_action(db, type_='broadcast.send', payload={'broadcast_id': str(store)},
                                chat_id=1, idempotency_key='test-send')
         action_id = action.id
@@ -254,6 +260,7 @@ def test_legacy_callback_receipts(store, application):
         assert db.get(Broadcast, store).sent == 1
         assert db.get(BroadcastCopy, (store, 10)).message_id == 90
     assert len(application.calls) == 2
+    assert all(payload['entities'] == [{'type': 'underline', 'offset': 0, 'length': 3}] for _, payload in application.calls)
 
 
 def test_api_preview_releases_session(store, application, monkeypatch):
@@ -286,14 +293,14 @@ def test_command_permissions_parsing_and_listing(store, application, monkeypatch
     update.effective_user.id = message.chat_id = 1
     message.text = f'/mailing_edit {store} New 😀\nsecond line'
     asyncio.run(application.app.on_mailing_edit(update, context))
-    edit.assert_awaited_with(store, 1, 'New 😀\nsecond line')
+    edit.assert_awaited_with(store, 1, 'New 😀\nsecond line', [])
     with database.session() as db:
         db.get(Broadcast, store).message_id = 77
         db.add(Broadcast(text='PRIVATE OTHER OWNER', status='sent', chat_id=2))
     message.reply_to_message = SimpleNamespace(message_id=77)
     message.text = '/mailing_edit Reply 😀\nsecond line'
     asyncio.run(application.app.on_mailing_edit(update, context))
-    edit.assert_awaited_with(store, 1, 'Reply 😀\nsecond line')
+    edit.assert_awaited_with(store, 1, 'Reply 😀\nsecond line', [])
     message.reply_to_message = None
     message.text = '/mailing_edit'
     asyncio.run(application.app.on_mailing_edit(update, context))
@@ -311,13 +318,81 @@ def test_command_permissions_parsing_and_listing(store, application, monkeypatch
 def test_receipt_write_failure_is_not_rejection(store, application, monkeypatch):
     from contextlib import contextmanager
 
+    original = database.session
+    calls = 0
+
     @contextmanager
     def broken():
-        raise RuntimeError('database secret must not be exposed')
-        yield
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError('database secret must not be exposed')
+        with original() as db:
+            yield db
 
     monkeypatch.setattr(database, 'session', broken)
     result = asyncio.run(deliver_broadcast('old', [10], store))
     assert result['sent'] == 1 and result['failed'] == []
     assert result['untracked'] == [{'chat_id': 10, 'message_id': 90}]
     assert 'Do not resend' in application.app._delivery_notice('Delivery', result)
+
+
+def test_formatting_only_retry_and_removal(store, monkeypatch):
+    import json
+
+    import httpx
+
+    real_client = httpx.AsyncClient
+    calls = []
+    failing = {2}
+    entities = [{'type': 'text_link', 'offset': 0, 'length': 3, 'url': 'https://example.org/hidden'}]
+
+    def handle(request):
+        payload = json.loads(request.content)
+        calls.append((request.url.path.rsplit('/', 1)[1], payload))
+        if request.url.path.endswith('sendMessage'):
+            return httpx.Response(200, json={'ok': True, 'result': {'message_id': payload['chat_id'] * 10}})
+        if payload['chat_id'] in failing:
+            return httpx.Response(400, json={'ok': False, 'description': 'retry'})
+        return httpx.Response(400, json={'ok': False, 'description': 'Bad Request: message is not modified'})
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw))
+    with database.session() as db:
+        db.get(Broadcast, store).entities = entities
+    asyncio.run(deliver_broadcast('old', [1, 2], store))
+    assert all(payload['entities'] == entities for _, payload in calls)
+    with database.session() as db:
+        assert db.get(BroadcastCopy, (store, 1)).applied_entities == entities
+    changed = [{'type': 'bold', 'offset': 0, 'length': 3}]
+    calls.clear()
+    assert 'Updated 1; failed 1' in asyncio.run(edit_mailing(store, 1, 'old', changed))
+    with database.session() as db:
+        assert db.get(Broadcast, store).entities == changed
+        assert db.get(BroadcastCopy, (store, 2)).applied_entities == entities
+    failing.clear()
+    calls.clear()
+    assert 'Updated 1; failed 0; skipped 1' in asyncio.run(edit_mailing(store, 1, 'old', changed))
+    assert len(calls) == 1 and calls[0][0] == 'editMessageText'
+    calls.clear()
+    assert 'Updated 2' in asyncio.run(edit_mailing(store, 1, 'old', []))
+    assert all(payload['entities'] == [] for _, payload in calls)
+
+
+def test_native_preview_separate_body(store, application):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from telegram import MessageEntity
+
+    message = SimpleNamespace(chat_id=1, text='/mailing 😀\nlink',
+                              entities=[MessageEntity('text_link', 12, 4, url='https://example.org/hidden')],
+                              reply_text=AsyncMock(return_value=SimpleNamespace(message_id=88)))
+    update = SimpleNamespace(message=message, effective_user=SimpleNamespace(id=1))
+    asyncio.run(application.app.on_mailing(update, SimpleNamespace(args=[])))
+    preview = message.reply_text.call_args_list[0]
+    assert preview.args == ('😀\nlink',)
+    assert preview.kwargs['parse_mode'] is None
+    assert preview.kwargs['entities'][0].offset == 3
+    with database.session() as db:
+        row = db.scalar(select(Broadcast).where(Broadcast.status == 'choosing'))
+        assert row.entities[0]['url'] == 'https://example.org/hidden'
