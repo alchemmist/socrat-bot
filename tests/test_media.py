@@ -394,7 +394,10 @@ def test_postlease_refresh_barriers(request, monkeypatch):
 
 def test_progress_transport_deadline_and_heartbeat(monkeypatch):
     prepare()
-    monkeypatch.setattr(media, "HTTP_DEADLINE", .12)
+    # Allow real PostgreSQL round trips on loaded CI runners; 120 ms could
+    # expire before two renewals despite a healthy heartbeat. Keep the actual
+    # wall-clock deadline and all ownership/cleanup assertions exercised.
+    monkeypatch.setattr(media, "HTTP_DEADLINE", 1.0)
     monkeypatch.setattr(media, "HEARTBEAT_INTERVAL", .02)
     renewals = []
     renew = media._renew
