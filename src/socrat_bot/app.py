@@ -879,8 +879,11 @@ async def post_message(body: OutMessage, x_internal_token: str | None = Header(d
     if body.images and card is None:
         raise HTTPException(status_code=400, detail="images require card, alert, or singleton alerts")
     if card is not None:
+        from socrat_bot.primary_graphs import capture as capture_primary_graph
+        raw_alert = body.alert or (body.alerts[0] if body.alerts else None)
+        primary_graph = await capture_primary_graph(card.key, raw_alert)
         recipients, jobs, snapshot = await asyncio.to_thread(
-            submit_card, card, body.actions, body.images, metadata=True
+            submit_card, card, body.actions, body.images, metadata=True, primary_graph=primary_graph
         )
         await dispatch_jobs(jobs)
         if body.images:

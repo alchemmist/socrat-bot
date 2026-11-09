@@ -91,8 +91,18 @@ class Broadcast(Base):
     send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class GraphSnapshot(Base):
+    __tablename__ = "graph_snapshots"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    png: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    render_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class TelegramCard(Base):
     __tablename__ = "telegram_cards"
+    message_kind: Mapped[str] = mapped_column(String(8), default="text", server_default="text")
+    graph_capture: Mapped[str | None] = mapped_column(String(64), nullable=True)
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -122,6 +132,8 @@ class SudoRequest(Base):
 
 class Incident(Base):
     __tablename__ = "incidents"
+    graph_capture: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    graph_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     generation: Mapped[int] = mapped_column(Integer, default=1)
     level: Mapped[int] = mapped_column(Integer)

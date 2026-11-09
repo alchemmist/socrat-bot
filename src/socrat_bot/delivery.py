@@ -29,10 +29,15 @@ from socrat_bot.logic import create_action
 from socrat_bot.models import AlertOutbox, CardDelivery, Incident, TelegramCard
 
 
-def submit_card(card, custom_actions=None, images=None, *, metadata=False):
+def submit_card(card, custom_actions=None, images=None, *, metadata=False, primary_graph=None):
     with session() as db:
         recipients = route(db, card.key, card.firing)
         incident = db.get(Incident, card.key)
+        if primary_graph:
+            from socrat_bot.models import GraphSnapshot
+            snapshot = db.get(GraphSnapshot, primary_graph)
+            if snapshot is not None and snapshot.png:
+                incident.graph_capture, incident.graph_generation = primary_graph, incident.generation
         from socrat_bot.media import publish
 
         publish(db, incident, images)

@@ -21,6 +21,8 @@ from socrat_bot.models import (
     User,
     utcnow,
 )
+from socrat_bot.primary_delivery import adapt as adapt_primary
+from socrat_bot.primary_delivery import post as post_primary
 
 Work = tuple[uuid.UUID, str, dict, dict]
 
@@ -413,7 +415,7 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
         if p["kind"] == "retire":
             return (
                 row.id,
-                "editMessageText",
+                "editMessageReplyMarkup" if p.get("message_kind")=="photo" else "editMessageText",
                 {
                     "chat_id": p["chat_id"],
                     "message_id": p["message_id"],
@@ -503,22 +505,16 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             and state.delivered_revision >= state.revision
             and card.text == text
             and card.status == incident.status
+            and (card.message_kind != "photo" or incident.graph_generation != incident.generation or not incident.graph_capture or card.graph_capture == incident.graph_capture)
         ):
             discard()
             return None
         if p["kind"] == "spi":
             # Always confirm retry via idempotent edit; desired state is not delivery acknowledgement.
-            return (
-                row.id,
-                "editMessageText",
-                {
-                    "chat_id": p["chat_id"],
-                    "message_id": card.message_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                },
-                p,
-            )
+            body = {"chat_id": p["chat_id"], "message_id": card.message_id,
+                    "text": text, "parse_mode": "HTML"}
+            method, body = adapt_primary(db, incident, card, existing, "editMessageText", body, p)
+            return row.id, method, body, p
         rows = []
         # Preserve the existing mute policy: a muted card has no buttons.
         if incident.status == "firing" and "<i>" not in text:
@@ -589,7 +585,8 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
         }
         if existing:
             body["message_id"] = card.message_id
-        return row.id, "editMessageText" if existing else "sendMessage", body, p
+        method, body = adapt_primary(db, incident, card, existing, "editMessageText" if existing else "sendMessage", body, p)
+        return row.id, method, body, p
 
 
 def renew_lease(p):
@@ -619,7 +616,7 @@ def authorize_http(work: Work) -> bool:
         )
         if state.lease_owner != uuid.UUID(p["_owner"]):
             return False
-        if _method == "sendMessage":
+        if _method in ("sendMessage", "sendPhoto"):
             user = db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
             if not user or not user.alerts_enabled:
                 # An unsubscribe may arrive after this work was prepared.
@@ -669,10 +666,8 @@ async def _deliver_work(work: Work) -> bool:
         ):
             return False
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{method}",
-                json=body,
-            )
+            response = await post_primary(client,
+                f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{method}", method, body)
             data = response.json()
             if not data.get("ok") and "message is not modified" not in str(data):
                 definite_rejection = True
@@ -742,6 +737,7 @@ def finish_work(work: Work, data: dict) -> bool:
                         "kind": "retire",
                         "message_id": message_id,
                         "text": retired,
+                        "message_kind": p.get("_message_kind", "text"),
                     }
                 )
             )
@@ -758,6 +754,12 @@ def finish_work(work: Work, data: dict) -> bool:
             incident.status if incident.generation == p["generation"] else card.status,
             message_id,
         )
+        if p.get("_supersedes_photo"):
+            db.add(AlertOutbox(payload={"key": p["key"], "generation": p["generation"],
+                "chat_id": p["chat_id"], "kind": "retire", "message_id": p["_supersedes_photo"],
+                "text": "", "message_kind": "photo"}))
+        card.message_kind = p.get("_message_kind", "text")
+        card.graph_capture = p.get("_graph_capture")
         # Applied SPI metadata describes the actual accepted HTTP snapshot, never newer desired state.
         card.text = body["text"]
         card.spi_url, card.spi_label, card.note = (
