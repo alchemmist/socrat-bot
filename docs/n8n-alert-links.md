@@ -22,7 +22,8 @@ not other workflow engines. Known platform mappings are intentionally bounded:
 - SPI `namespace=automation,component=spi-triage`: original SPI workflow.
 - Yandex calendar maintenance-heartbeat alert: original maintenance workflow.
 - Combined Yandex session/speech failure: n8n home (no invented attribution).
-- Explicit n8n component/workload/service in automation: n8n home.
+- Explicit n8n component/workload/container/service in automation: n8n home.
+- Actual blackbox probe `service_id=n8n` (no namespace label): n8n home.
 - Unrelated infrastructure or namespace=automation alone: no n8n link.
 
 The provider is `n8n` and defaults immediately after `alert`, so it survives the

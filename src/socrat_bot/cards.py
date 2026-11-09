@@ -409,6 +409,10 @@ class N8nLink(LinkProvider):
             if execution and re.fullmatch(r"[0-9]{1,24}", execution):
                 return Link("n8n execution", base + "/executions/" + execution)
             return Link("n8n workflow", base)
+        # Actual blackbox health alerts identify their target by service_id,
+        # without a Kubernetes namespace label.
+        if labels.get("service_id") == "n8n":
+            return Link("n8n", N8N_URL)
         if labels.get("namespace") != "automation":
             return None
         if labels.get("component") == "spi-triage":
@@ -420,7 +424,7 @@ class N8nLink(LinkProvider):
             # Combined voice/session rules cannot identify one execution/workflow.
             return Link("n8n", N8N_URL)
         if (labels.get("component") == "n8n" or any(
-                labels.get(key) == "n8n" for key in ("deployment", "service", "service_name", "app"))):
+                labels.get(key) == "n8n" for key in ("deployment", "statefulset", "service", "service_name", "app", "container"))):
             return Link("n8n", N8N_URL)
         return None
 

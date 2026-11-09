@@ -66,6 +66,14 @@ def test_n8n_service_health_links_to_ui_and_never_to_a_fabricated_execution():
     assert result[0].url == N8N_URL
 
 
+def test_actual_service_probe_labels_need_no_namespace_and_other_probes_do_not_match():
+    result = links({'labels': {'alertname': 'SocratServiceN8nUnavailable', 'service_id': 'n8n'}})
+    assert result[0].url == N8N_URL
+    assert not links({'labels': {'alertname': 'SocratServiceHarborUnavailable', 'service_id': 'harbor'}})
+    result = links({'labels': {'namespace': 'automation', 'container': 'n8n', 'pod': 'n8n-example'}})
+    assert result[0].url == N8N_URL
+
+
 def test_link_survives_default_cap_and_explicit_provider_optout_is_preserved():
     labels = {'namespace': 'automation', 'deployment': 'n8n', 'node': 'socrat-1'}
     result = select_links(labels)
