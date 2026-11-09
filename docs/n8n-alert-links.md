@@ -34,9 +34,19 @@ limits require; this feature does not truncate the link or trigger new graphs.
 
 ## Checks / release boundary
 
-New checks are declared in `qg.yaml`, generated with pinned CLI/provider0.1.8 and
+New checks are declared in `qg.yaml`, generated with pinned CLI/provider 0.2.0 and
 immutable runtime/setup/upload Actions, as in the official quickstart/migration.
 `uv run qg generate` / `uv run qg validate`; do not edit generated YAML directly.
+The explicit PR/main flows use `presentation: none`: ordinary checks, artifacts
+and job summaries stay enabled, but no trusted publisher or `/qg` comment handler
+is generated. Released providers still do not guarantee fork PR resolution when
+`workflow_run.pull_requests` and commit-to-PR lookup are empty, or preservation
+of every pending command in a serialized concurrency group. These optional
+surfaces stay disabled rather than hand-patching generated workflows or claiming
+those upstream bugs are fixed. Re-enable PR presentation only after a compatible
+released compiler/runtime and verified fork/command-queue coverage are available.
+See <https://quality-graph.xyz/flows/>. No aggregate merge requirement is configured.
+
 No qg.yaml existed here before this change. Keep legacy CI/release until bootstrap
 and representative PR parity; privileged Harbor/deploy job remains outside the
 secretless graph. Isolated PostgreSQL test-service trust is CI-only, never a

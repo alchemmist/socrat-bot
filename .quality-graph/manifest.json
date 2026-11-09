@@ -6,17 +6,110 @@
     ]
   },
   "defaultBranch": "main",
-  "graphDigest": "e0daad10369c78f4566a606a65ab03fe3f4ea357c3aa9dd080ec650e4cdb3b5f",
+  "flows": {
+    "main": {
+      "branches": [
+        "main"
+      ],
+      "concurrency": null,
+      "dependencies": "graph",
+      "execution": "github-actions",
+      "inputs": {},
+      "nodes": [
+        {
+          "checkpoint": {},
+          "id": "graph-freshness",
+          "needs": [],
+          "operation": "graph-freshness"
+        },
+        {
+          "checkpoint": {},
+          "id": "n8n-card-links",
+          "needs": [],
+          "operation": "n8n-card-links"
+        },
+        {
+          "checkpoint": {},
+          "id": "full-regressions",
+          "needs": [
+            "n8n-card-links"
+          ],
+          "operation": "full-regressions"
+        }
+      ],
+      "presentation": "none",
+      "trigger": "push"
+    },
+    "review": {
+      "branches": [],
+      "concurrency": null,
+      "dependencies": "graph",
+      "execution": "github-actions",
+      "inputs": {},
+      "nodes": [
+        {
+          "checkpoint": {},
+          "id": "graph-freshness",
+          "needs": [],
+          "operation": "graph-freshness"
+        },
+        {
+          "checkpoint": {},
+          "id": "n8n-card-links",
+          "needs": [],
+          "operation": "n8n-card-links"
+        },
+        {
+          "checkpoint": {},
+          "id": "full-regressions",
+          "needs": [
+            "n8n-card-links"
+          ],
+          "operation": "full-regressions"
+        }
+      ],
+      "presentation": "none",
+      "trigger": "pull-request"
+    }
+  },
+  "graphDigest": "d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876",
   "graphVersion": 0,
   "labels": {
     "enabled": false
   },
-  "manifestVersion": 0,
-  "nodes": [
-    {
+  "manifestVersion": 1,
+  "operations": {
+    "full-regressions": {
+      "diffOnly": false,
+      "env": {
+        "TEST_POSTGRES_URL": "postgresql+psycopg://socrat_test@localhost:5432/socrat_test"
+      },
+      "id": "full-regressions",
+      "policy": {
+        "approvals": {
+          "files": false,
+          "findings": true,
+          "node": false
+        },
+        "blocking": true,
+        "blockingSeverities": [
+          "error"
+        ]
+      },
+      "profile": "postgres",
+      "result": {
+        "adapter": "exit-code"
+      },
+      "step": {
+        "run": "uv run pytest -q"
+      },
+      "timeoutMinutes": 15,
+      "title": "Full bot regressions with isolated PostgreSQL"
+    },
+    "graph-freshness": {
+      "diffOnly": false,
       "env": {},
       "id": "graph-freshness",
-      "needs": [],
       "policy": {
         "approvals": {
           "files": false,
@@ -38,10 +131,10 @@
       "timeoutMinutes": 5,
       "title": "Quality Graph declaration freshness"
     },
-    {
+    "n8n-card-links": {
+      "diffOnly": false,
       "env": {},
       "id": "n8n-card-links",
-      "needs": [],
       "policy": {
         "approvals": {
           "files": false,
@@ -58,41 +151,12 @@
         "adapter": "exit-code"
       },
       "step": {
-        "run": "uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py\nuv run pytest -q tests/test_cards.py tests/test_n8n_links.py\n"
+        "run": "uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py\nuv run pytest -q tests/test_cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py\n"
       },
       "timeoutMinutes": 5,
       "title": "Safe n8n card links and existing card regressions"
-    },
-    {
-      "env": {
-        "TEST_POSTGRES_URL": "postgresql+psycopg://socrat_test@localhost:5432/socrat_test"
-      },
-      "id": "full-regressions",
-      "needs": [
-        "n8n-card-links"
-      ],
-      "policy": {
-        "approvals": {
-          "files": false,
-          "findings": true,
-          "node": false
-        },
-        "blocking": true,
-        "blockingSeverities": [
-          "error"
-        ]
-      },
-      "profile": "postgres",
-      "result": {
-        "adapter": "exit-code"
-      },
-      "step": {
-        "run": "uv run pytest -q"
-      },
-      "timeoutMinutes": 15,
-      "title": "Full bot regressions with isolated PostgreSQL"
     }
-  ],
+  },
   "profiles": {
     "default": {
       "env": {},
@@ -159,7 +223,7 @@
   "provider": "github",
   "resultSchemaVersion": 0,
   "runtime": {
-    "action": "alchemmist/quality-graph@b947f26e97ccf1c755050dfe38d98cbb688edb69",
+    "action": "alchemmist/quality-graph@3b0cf7d8a33215d5a3bb5521b4e0e41c18e8cb7c",
     "uploadArtifactAction": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
   }
 }

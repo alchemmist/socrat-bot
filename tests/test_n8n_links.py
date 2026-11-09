@@ -4,10 +4,12 @@ from socrat_bot.cards import N8N_URL, build_alert, n8n_link, render_card, select
 
 
 def links(payload):
+    """Select only n8n anchors from an otherwise ordinary alert card."""
     return [link for link in build_alert(payload).links if link.label.startswith('n8n')]
 
 
 def test_native_execution_generator_is_rendered_in_firing_and_resolved_cards():
+    """Keep execution navigation visible across status changes without migrating card keys."""
     url = N8N_URL + '/workflow/abc/executions/123'
     for status in ('firing', 'resolved'):
         payload = {'status': status, 'generatorURL': url, 'labels': {
@@ -20,12 +22,14 @@ def test_native_execution_generator_is_rendered_in_firing_and_resolved_cards():
 
 
 def test_most_precise_target_wins_and_annotations_are_supported():
+    """Prefer execution metadata over a generic home link irrespective of its source field."""
     payload = {'generatorURL': N8N_URL, 'annotations': {'n8n_url': N8N_URL + '/workflow/abc/executions/123'}}
     assert links(payload)[0].label == 'n8n execution'
     assert links({'annotations': {'n8n_url': N8N_URL + '/workflow/abc'}})[0].label == 'n8n workflow'
 
 
 def test_explicit_ids_and_generic_workflow_id_scope():
+    """Interpret generic workflow IDs only when the producer explicitly identifies n8n."""
     result = select_links({'component': 'n8n', 'workflow_id': 'abc', 'execution_id': '123'})
     assert next(link for link in result if link.label == 'n8n execution').url.endswith('/workflow/abc/executions/123')
     assert select_links({'n8n_workflow_id': 'abc'}, ['n8n'])[0].url.endswith('/workflow/abc')
@@ -45,11 +49,13 @@ def test_explicit_ids_and_generic_workflow_id_scope():
     N8N_URL + '/workflow/abc/executions/not-a-number',
 ])
 def test_untrusted_or_secret_bearing_urls_are_rejected(url):
+    """Reject unsafe authorities, paths and token-bearing metadata instead of forwarding it."""
     assert n8n_link(url) is None
     assert not links({'generatorURL': url})
 
 
 def test_specific_spi_and_calendar_links_without_namespace_wide_guessing():
+    """Map only known platform targets and keep unrelated automation alerts untouched."""
     spi = links({'labels': {'namespace': 'automation', 'component': 'spi-triage'}})
     assert spi[0].url.endswith('/workflow/J9akzlydrf9XZiID')
     maintenance = links({'labels': {'namespace': 'automation', 'component': 'yandex-calendar',
@@ -62,11 +68,13 @@ def test_specific_spi_and_calendar_links_without_namespace_wide_guessing():
 
 
 def test_n8n_service_health_links_to_ui_and_never_to_a_fabricated_execution():
+    """Link service health to its UI rather than inventing a failed execution."""
     result = links({'labels': {'namespace': 'automation', 'deployment': 'n8n'}})
     assert result[0].url == N8N_URL
 
 
 def test_actual_service_probe_labels_need_no_namespace_and_other_probes_do_not_match():
+    """Respect real blackbox labels while excluding unrelated probe targets."""
     result = links({'labels': {'alertname': 'SocratServiceN8nUnavailable', 'service_id': 'n8n'}})
     assert result[0].url == N8N_URL
     assert not links({'labels': {'alertname': 'SocratServiceHarborUnavailable', 'service_id': 'harbor'}})
@@ -75,6 +83,7 @@ def test_actual_service_probe_labels_need_no_namespace_and_other_probes_do_not_m
 
 
 def test_link_survives_default_cap_and_explicit_provider_optout_is_preserved():
+    """Preserve the four-link budget and callers that intentionally omit this provider."""
     labels = {'namespace': 'automation', 'deployment': 'n8n', 'node': 'socrat-1'}
     result = select_links(labels)
     assert len(result) <= 4 and any(link.label == 'n8n' for link in result)
@@ -82,6 +91,7 @@ def test_link_survives_default_cap_and_explicit_provider_optout_is_preserved():
 
 
 def test_invalid_id_does_not_enter_link():
+    """Discard unsafe execution IDs and retain a safe workflow fallback."""
     assert select_links({'n8n_workflow_id': '../../secret'}, ['n8n']) == []
     result = select_links({'n8n_workflow_id': 'abc', 'n8n_execution_id': '../secret'}, ['n8n'])
     assert result[0].url == N8N_URL + '/workflow/abc'

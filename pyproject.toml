@@ -21,8 +21,8 @@ dev = ["pytest>=8.3", "PyYAML>=6.0"]
 dev = [
     "pytest>=8.3",
     "PyYAML>=6.0",
-    "quality-graph-cli==0.1.8",
-    "quality-graph-github==0.1.8",
+    "quality-graph-cli==0.2.0",
+    "quality-graph-github==0.2.0",
     "ruff>=0.17.4",
 ]
 

@@ -390,9 +390,12 @@ def n8n_link(url: str) -> Link | None:
 
 
 class N8nLink(LinkProvider):
+    """Resolve explicit n8n metadata or bounded platform-owned workflow mappings."""
+
     name = "n8n"
 
     def match(self, labels: dict[str, str]) -> Link | None:
+        """Prefer validated URLs/IDs, then known targets; never guess from namespace alone."""
         explicit = n8n_link(labels.get("n8n_url", ""))
         if explicit:
             return explicit
@@ -550,6 +553,11 @@ def episode_card_key(base: str, payload: dict) -> str:
 
 
 def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
+    """Build a stable alert card, projecting trusted UI links without mutating its identity.
+
+    n8n metadata affects links only. Original labels still determine matchers and
+    card/episode keys; arbitrary generator URLs never become hyperlink targets.
+    """
     labels = labels_of(payload.get("labels"))
     annotations = labels_of(payload.get("annotations"))
     name = labels.get("alertname") or str(payload.get("name") or "alert")

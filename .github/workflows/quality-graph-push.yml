@@ -29,7 +29,7 @@ jobs:
       - name: Collect Quality Graph declaration freshness result
         id: quality-result
         if: always()
-        uses: alchemmist/quality-graph@b947f26e97ccf1c755050dfe38d98cbb688edb69
+        uses: alchemmist/quality-graph@3b0cf7d8a33215d5a3bb5521b4e0e41c18e8cb7c
         with:
           operation: collect
           node-id: graph-freshness
@@ -37,10 +37,13 @@ jobs:
           adapter: exit-code
           report-path: ''
           command-outcome: ${{ steps.quality-command.outcome }}
-          graph-digest: e0daad10369c78f4566a606a65ab03fe3f4ea357c3aa9dd080ec650e4cdb3b5f
-          approval-findings: 'true'
+          graph-digest: d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876
+          approval-findings: 'false'
           approval-files: 'false'
           approval-node: 'false'
+          flow-id: main
+          operation-id: graph-freshness
+          presentation: none
       - name: Upload Quality Graph declaration freshness result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -55,6 +58,12 @@ jobs:
         env:
           EXIT_CODE: ${{ steps.quality-result.outputs.exit-code }}
         run: exit "${EXIT_CODE:-2}"
+    env:
+      QG_FLOW_ID: main
+      QG_OPERATION_ID: graph-freshness
+      QG_NODE_ID: graph-freshness
+      QG_NODE_TITLE: Quality Graph declaration freshness
+      QG_GRAPH_DIGEST: d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876
     timeout-minutes: 5
   n8n-card-links:
     name: Safe n8n card links and existing card regressions
@@ -67,9 +76,9 @@ jobs:
           persist-credentials: 'false'
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - run: uv sync --locked
-      - run: 'uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py
+      - run: 'uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py
 
-          uv run pytest -q tests/test_cards.py tests/test_n8n_links.py
+          uv run pytest -q tests/test_cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py
 
           '
         name: Run Safe n8n card links and existing card regressions
@@ -78,7 +87,7 @@ jobs:
       - name: Collect Safe n8n card links and existing card regressions result
         id: quality-result
         if: always()
-        uses: alchemmist/quality-graph@b947f26e97ccf1c755050dfe38d98cbb688edb69
+        uses: alchemmist/quality-graph@3b0cf7d8a33215d5a3bb5521b4e0e41c18e8cb7c
         with:
           operation: collect
           node-id: n8n-card-links
@@ -86,10 +95,13 @@ jobs:
           adapter: exit-code
           report-path: ''
           command-outcome: ${{ steps.quality-command.outcome }}
-          graph-digest: e0daad10369c78f4566a606a65ab03fe3f4ea357c3aa9dd080ec650e4cdb3b5f
-          approval-findings: 'true'
+          graph-digest: d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876
+          approval-findings: 'false'
           approval-files: 'false'
           approval-node: 'false'
+          flow-id: main
+          operation-id: n8n-card-links
+          presentation: none
       - name: Upload Safe n8n card links and existing card regressions result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -104,6 +116,12 @@ jobs:
         env:
           EXIT_CODE: ${{ steps.quality-result.outputs.exit-code }}
         run: exit "${EXIT_CODE:-2}"
+    env:
+      QG_FLOW_ID: main
+      QG_OPERATION_ID: n8n-card-links
+      QG_NODE_ID: n8n-card-links
+      QG_NODE_TITLE: Safe n8n card links and existing card regressions
+      QG_GRAPH_DIGEST: d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876
     timeout-minutes: 5
   full-regressions:
     name: Full bot regressions with isolated PostgreSQL
@@ -123,7 +141,7 @@ jobs:
       - name: Collect Full bot regressions with isolated PostgreSQL result
         id: quality-result
         if: always()
-        uses: alchemmist/quality-graph@b947f26e97ccf1c755050dfe38d98cbb688edb69
+        uses: alchemmist/quality-graph@3b0cf7d8a33215d5a3bb5521b4e0e41c18e8cb7c
         with:
           operation: collect
           node-id: full-regressions
@@ -131,10 +149,13 @@ jobs:
           adapter: exit-code
           report-path: ''
           command-outcome: ${{ steps.quality-command.outcome }}
-          graph-digest: e0daad10369c78f4566a606a65ab03fe3f4ea357c3aa9dd080ec650e4cdb3b5f
-          approval-findings: 'true'
+          graph-digest: d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876
+          approval-findings: 'false'
           approval-files: 'false'
           approval-node: 'false'
+          flow-id: main
+          operation-id: full-regressions
+          presentation: none
       - name: Upload Full bot regressions with isolated PostgreSQL result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -153,6 +174,11 @@ jobs:
       - n8n-card-links
     env:
       TEST_POSTGRES_URL: postgresql+psycopg://socrat_test@localhost:5432/socrat_test
+      QG_FLOW_ID: main
+      QG_OPERATION_ID: full-regressions
+      QG_NODE_ID: full-regressions
+      QG_NODE_TITLE: Full bot regressions with isolated PostgreSQL
+      QG_GRAPH_DIGEST: d54063f47ee419e6adbf52eea3ce6ccc1c51c001fde5fddc8a4d76230badf876
     timeout-minutes: 15
     services:
       postgres:
