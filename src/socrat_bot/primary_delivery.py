@@ -7,6 +7,11 @@ from sqlalchemy.orm import defer
 from socrat_bot.models import GraphSnapshot
 
 
+def caption_units(text):
+    """Conservative Telegram UTF-16 budget, including raw markup overhead."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def adapt(db, incident, card, existing, method, body, snapshot):
     is_photo = bool(existing and card.message_kind == "photo")
     desired = (
@@ -24,7 +29,7 @@ def adapt(db, incident, card, existing, method, body, snapshot):
     # Old text messages keep their identity/type, including rollout-era fallbacks.
     if existing and not is_photo:
         return method, body
-    if is_photo and len(body["text"]) > 1024:
+    if is_photo and caption_units(body["text"]) > 1024:
         # Telegram cannot turn a photo into arbitrary-length text. Preserve the
         # complete text as the new primary, retire old buttons AFTER acceptance.
         snapshot["_supersedes_photo"] = card.message_id
@@ -39,7 +44,7 @@ def adapt(db, incident, card, existing, method, body, snapshot):
         return "editMessageCaption", body
     # Reserve caption headroom for subsequent SPI/escalation metadata. Oversized
     # initial messages preserve their full existing text and buttons, without PNG.
-    if not existing and capture and len(body["text"]) <= 768 and capture.png:
+    if not existing and capture and caption_units(body["text"]) <= 768 and capture.png:
         body["_graph_data"] = capture.png
         snapshot["_message_kind"], snapshot["_graph_capture"] = "photo", capture.id
         return "sendPhoto", body

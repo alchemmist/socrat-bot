@@ -89,7 +89,9 @@ async def capture(key, alert):
             payload["observed_at"] = observed
             token = await asyncio.to_thread(_token)
             async with (
-                httpx.AsyncClient(timeout=4, follow_redirects=False) as client,
+                httpx.AsyncClient(
+                    timeout=4, follow_redirects=False, trust_env=False
+                ) as client,
                 client.stream(
                     "POST",
                     GATEWAY,

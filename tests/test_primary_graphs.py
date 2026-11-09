@@ -206,3 +206,10 @@ def test_render_failure_does_not_prevent_text_delivery(monkeypatch):
         lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(handler), **kw),
     )
     assert asyncio.run(capture("graph", {"annotations": {"spi_graphs": "{}"}})) is None
+
+
+def test_caption_budget_counts_astral_characters_without_truncation():
+    from socrat_bot.primary_delivery import caption_units
+
+    assert caption_units("ordinary caption") == 16
+    assert caption_units("\U0001f534" * 600) == 1200
