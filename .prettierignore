@@ -1,0 +1,5 @@
+# Quality Graph generated files (managed by qg)
+.github/workflows/quality-graph.yml
+.github/workflows/quality-graph-push.yml
+.quality-graph/manifest.json
+# End Quality Graph generated files

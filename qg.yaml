@@ -1,0 +1,68 @@
+version: 0
+provider:
+  name: github
+  configuration:
+    default-branch: main
+    runtime:
+      action: alchemmist/quality-graph@3b0cf7d8a33215d5a3bb5521b4e0e41c18e8cb7c
+      upload-artifact-action: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+profiles:
+  default:
+    runner: ubuntu-24.04
+    timeout-minutes: 5
+    setup:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: "false"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - run: uv sync --locked
+  postgres:
+    extends: default
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: socrat_test
+          POSTGRES_USER: socrat_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U socrat_test -d socrat_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://socrat_test@localhost:5432/socrat_test
+operations:
+  graph-freshness:
+    title: Quality Graph declaration freshness
+    run: uv run qg validate
+  n8n-card-links:
+    title: Safe n8n card links and existing card regressions
+    run: |
+      uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py
+      uv run pytest -q tests/test_cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py
+  full-regressions:
+    title: Full bot regressions with isolated PostgreSQL
+    profile: postgres
+    run: uv run pytest -q
+flows:
+  review:
+    trigger: pull-request
+    presentation: none
+    nodes:
+      graph-freshness: {}
+      n8n-card-links: {}
+      full-regressions:
+        needs: [n8n-card-links]
+  main:
+    trigger:
+      push:
+        branches: [main]
+    presentation: none
+    dependencies: graph
+    nodes:
+      graph-freshness: {}
+      n8n-card-links: {}
+      full-regressions:
+        needs: [n8n-card-links]

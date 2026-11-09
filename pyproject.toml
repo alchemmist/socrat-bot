@@ -18,7 +18,13 @@ dependencies = [
 dev = ["pytest>=8.3", "PyYAML>=6.0"]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "PyYAML>=6.0"]
+dev = [
+    "pytest>=8.3",
+    "PyYAML>=6.0",
+    "quality-graph-cli==0.2.0",
+    "quality-graph-github==0.2.0",
+    "ruff>=0.17.4",
+]
 
 [project.scripts]
 socrat-sudo = "socrat_sudo.__main__:main"
