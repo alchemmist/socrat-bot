@@ -13,7 +13,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "https://grafana.socrat.alchemmist.xyz").rstrip("/")
 RANCHER_URL = os.environ.get("RANCHER_URL", "https://rancher.socrat.alchemmist.xyz").rstrip("/")
@@ -66,7 +66,7 @@ ARGO_APPS: dict[str, tuple[str, ...]] = {
     "x-ui": ("x-ui",),
 }
 
-DEFAULT_ALERT_LINKS = ("alert", "nodes", "rancher", "logs", "argo")
+DEFAULT_ALERT_LINKS = ("alert", "n8n", "nodes", "rancher", "logs", "argo")
 ALERT_LINK_LIMIT = 4
 _HOST = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,126}$")
 
@@ -363,6 +363,68 @@ class ArgoLink(LinkProvider):
         return Link("Argo CD", f"{ARGOCD_URL}/applications/argocd/{quote(app, safe='')}")
 
 
+N8N_URL = "https://n8n.socrat.alchemmist.xyz"
+_N8N_WORKFLOW = re.compile(r"^/workflow/[A-Za-z0-9_-]{1,80}/?$")
+_N8N_EXECUTION = re.compile(r"^/workflow/[A-Za-z0-9_-]{1,80}/executions/[0-9]{1,24}/?$")
+_N8N_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
+
+def n8n_link(url: str) -> Link | None:
+    """Allow only token-free HTTPS links to the existing human n8n UI."""
+    if not isinstance(url, str) or any(ord(c) < 33 or ord(c) > 126 for c in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or parsed.netloc != "n8n.socrat.alchemmist.xyz"
+                or parsed.query or parsed.fragment or "?" in url or "#" in url):
+            return None
+    except ValueError:
+        return None
+    if _N8N_EXECUTION.fullmatch(parsed.path):
+        return Link("n8n execution", N8N_URL + parsed.path.rstrip("/"))
+    if _N8N_WORKFLOW.fullmatch(parsed.path):
+        return Link("n8n workflow", N8N_URL + parsed.path.rstrip("/"))
+    if parsed.path in ("", "/"):
+        return Link("n8n", N8N_URL)
+    return None
+
+
+class N8nLink(LinkProvider):
+    name = "n8n"
+
+    def match(self, labels: dict[str, str]) -> Link | None:
+        explicit = n8n_link(labels.get("n8n_url", ""))
+        if explicit:
+            return explicit
+        # Prefixed IDs are explicit intent. Generic workflow_id is n8n-specific
+        # only when the component says so; never map GitHub/Temporal IDs to n8n.
+        workflow = labels.get("n8n_workflow_id", "")
+        if not workflow and labels.get("component") == "n8n":
+            workflow = labels.get("workflow_id", "")
+        if workflow and _N8N_ID.fullmatch(workflow):
+            execution = labels.get("n8n_execution_id", "")
+            if not execution and labels.get("component") == "n8n":
+                execution = labels.get("execution_id", "")
+            base = N8N_URL + "/workflow/" + workflow
+            if execution and re.fullmatch(r"[0-9]{1,24}", execution):
+                return Link("n8n execution", base + "/executions/" + execution)
+            return Link("n8n workflow", base)
+        if labels.get("namespace") != "automation":
+            return None
+        if labels.get("component") == "spi-triage":
+            # Existing stable platform workflow identity, not a namespace guess.
+            return Link("n8n workflow", N8N_URL + "/workflow/J9akzlydrf9XZiID")
+        if labels.get("component") == "yandex-calendar":
+            if labels.get("alertname") == "Yandex session maintenance heartbeat missing":
+                return Link("n8n workflow", N8N_URL + "/workflow/BJczDRwqaikJBnyo")
+            # Combined voice/session rules cannot identify one execution/workflow.
+            return Link("n8n", N8N_URL)
+        if (labels.get("component") == "n8n" or any(
+                labels.get(key) == "n8n" for key in ("deployment", "service", "service_name", "app"))):
+            return Link("n8n", N8N_URL)
+        return None
+
+
 class TracesLink(LinkProvider):
     name = "traces"
 
@@ -375,7 +437,7 @@ class TracesLink(LinkProvider):
 
 PROVIDERS: dict[str, LinkProvider] = {
     item.name: item
-    for item in (AlertLink(), NodesLink(), RancherLink(), LogsLink(), ArgoLink(), TracesLink())
+    for item in (AlertLink(), N8nLink(), NodesLink(), RancherLink(), LogsLink(), ArgoLink(), TracesLink())
 }
 
 
@@ -502,13 +564,23 @@ def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
         where = ""
     summary = annotations.get("summary") or annotations.get("description") or str(payload.get("summary") or "")
     status = "resolved" if str(payload.get("status") or "").lower() == "resolved" else "firing"
+    link_labels = dict(labels)
+    # generatorURL is already supplied by native Error Trigger notifications.
+    # Do not turn an arbitrary generator URL into a Telegram hyperlink.
+    candidates = [n8n_link(value) for value in (
+        payload.get("generatorURL", ""), annotations.get("n8n_url", ""), labels.get("n8n_url", ""))]
+    valid = [link for link in candidates if link]
+    if valid:
+        # Most precise target wins, independent of metadata field ordering.
+        chosen = min(valid, key=lambda link: {"n8n execution": 0, "n8n workflow": 1, "n8n": 2}[link.label])
+        link_labels["n8n_url"] = chosen.url
     return Card(
         key=episode_card_key(card_key(name, labels), payload),
         title=name,
         where=where,
         summary=summary,
         status=status,
-        links=select_links(labels, link_names),
+        links=select_links(link_labels, link_names),
         matchers=object_matchers(name, labels),
     )
 
