@@ -55,15 +55,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure Docker Buildx
+      - name: Verify scoped Harbor robot and prepare credentials
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: python3 scripts/harbor_ci_auth.py --repository homelab/socrat-bot
+      - name: Configure isolated Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Harbor
-        uses: docker/login-action@v3
         with:
-          registry: harbor.socrat.alchemmist.xyz
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
+          # Per-builder TLS interoperability, not a host/daemon/DNS change.
+          # Retain TLS1.3, certificate verification and native robot token auth.
+          driver-opts: |
+            env.GODEBUG=tlsmlkem=0
 
       - name: Build and push immutable image
         id: image
@@ -80,3 +83,13 @@ jobs:
         with:
           token: ${{ secrets.HOMELAB_DEPLOY_KEY }}
           image_version: ${{ steps.image.outputs.digest }}
+
+      - name: Remove ephemeral registry credentials
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os,pathlib
+          directory=pathlib.Path(os.environ.get('DOCKER_CONFIG','/nonexistent'))
+          if directory.name.startswith('harbor-ci-auth-') and directory.parent==pathlib.Path(os.environ['RUNNER_TEMP']):
+              (directory/'config.json').unlink(missing_ok=True)
+          PY
