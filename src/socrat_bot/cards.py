@@ -381,9 +381,9 @@ def n8n_link(url: str) -> Link | None:
     except ValueError:
         return None
     if _N8N_EXECUTION.fullmatch(parsed.path):
-        return Link("n8n execution", N8N_URL + parsed.path.rstrip("/"))
+        return Link("n8n", N8N_URL + parsed.path.rstrip("/"))
     if _N8N_WORKFLOW.fullmatch(parsed.path):
-        return Link("n8n workflow", N8N_URL + parsed.path.rstrip("/"))
+        return Link("n8n", N8N_URL + parsed.path.rstrip("/"))
     if parsed.path in ("", "/"):
         return Link("n8n", N8N_URL)
     return None
@@ -397,21 +397,27 @@ class N8nLink(LinkProvider):
     def match(self, labels: dict[str, str]) -> Link | None:
         """Prefer validated URLs/IDs, then known targets; never guess from namespace alone."""
         explicit = n8n_link(labels.get("n8n_url", ""))
-        if explicit:
-            return explicit
         # Prefixed IDs are explicit intent. Generic workflow_id is n8n-specific
         # only when the component says so; never map GitHub/Temporal IDs to n8n.
         workflow = labels.get("n8n_workflow_id", "")
         if not workflow and labels.get("component") == "n8n":
             workflow = labels.get("workflow_id", "")
+        if not workflow and labels.get("namespace") == "automation" and labels.get("component") == "spi-triage":
+            workflow = "J9akzlydrf9XZiID"
+        if not workflow and explicit and _N8N_WORKFLOW.fullmatch(urlsplit(explicit.url).path):
+            workflow = urlsplit(explicit.url).path.rstrip("/").split("/")[-1]
+        if explicit and _N8N_EXECUTION.fullmatch(urlsplit(explicit.url).path):
+            return explicit
         if workflow and _N8N_ID.fullmatch(workflow):
             execution = labels.get("n8n_execution_id", "")
             if not execution and labels.get("component") == "n8n":
                 execution = labels.get("execution_id", "")
             base = N8N_URL + "/workflow/" + workflow
             if execution and re.fullmatch(r"[0-9]{1,24}", execution):
-                return Link("n8n execution", base + "/executions/" + execution)
-            return Link("n8n workflow", base)
+                return Link("n8n", base + "/executions/" + execution)
+            return explicit or Link("n8n", base)
+        if explicit:
+            return explicit
         # Actual blackbox health alerts identify their target by service_id,
         # without a Kubernetes namespace label.
         if labels.get("service_id") == "n8n":
@@ -420,10 +426,10 @@ class N8nLink(LinkProvider):
             return None
         if labels.get("component") == "spi-triage":
             # Existing stable platform workflow identity, not a namespace guess.
-            return Link("n8n workflow", N8N_URL + "/workflow/J9akzlydrf9XZiID")
+            return Link("n8n", N8N_URL + "/workflow/J9akzlydrf9XZiID")
         if labels.get("component") == "yandex-calendar":
             if labels.get("alertname") == "Yandex session maintenance heartbeat missing":
-                return Link("n8n workflow", N8N_URL + "/workflow/BJczDRwqaikJBnyo")
+                return Link("n8n", N8N_URL + "/workflow/BJczDRwqaikJBnyo")
             # Combined voice/session rules cannot identify one execution/workflow.
             return Link("n8n", N8N_URL)
         if (labels.get("component") == "n8n" or any(
@@ -584,7 +590,8 @@ def build_alert(payload: dict, link_names: list[str] | None = None) -> Card:
     valid = [link for link in candidates if link]
     if valid:
         # Most precise target wins, independent of metadata field ordering.
-        chosen = min(valid, key=lambda link: {"n8n execution": 0, "n8n workflow": 1, "n8n": 2}[link.label])
+        chosen = min(valid, key=lambda link: 0 if _N8N_EXECUTION.fullmatch(urlsplit(link.url).path)
+                     else 1 if _N8N_WORKFLOW.fullmatch(urlsplit(link.url).path) else 2)
         link_labels["n8n_url"] = chosen.url
     return Card(
         key=episode_card_key(card_key(name, labels), payload),

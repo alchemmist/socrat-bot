@@ -1,6 +1,6 @@
 # n8n links in alert cards
 
-Alert cards now include a compact English HTML anchor (not a new callback action).
+All n8n targets use the same compact HTML anchor **n8n** (not a new callback action).
 It appears in the ordinary message/caption alongside existing links. Firing and
 Resolved use the same resolver. No payload mutation, existing card-key/mute/SPI
 identity migration, notification replay or historical message rewrite is required.
@@ -9,7 +9,8 @@ edit or credential access is needed for its link to become visible after release
 
 Priority: validated execution URL -> validated workflow URL -> n8n UI home.
 `generatorURL`, `annotations.n8n_url` and `labels.n8n_url` are supported; the most
-specific valid target wins. Only the fixed HTTPS n8n human origin and UI paths
+specific valid target wins. A valid execution ID also upgrades a supplied workflow URL;
+SPI execution IDs bind only to its known workflow, never an arbitrary namespace. Only the fixed HTTPS n8n human origin and UI paths
 `/workflow/<id>[/executions/<numeric-id>]` or home are accepted. No userinfo,
 query/fragment, alternate port/host, insecure scheme, encoded traversal, webhook
 endpoint or token-bearing URL is forwarded. Public UI links still require the

@@ -17,21 +17,21 @@ def test_native_execution_generator_is_rendered_in_firing_and_resolved_cards():
             'namespace': 'automation', 'workflow_id': 'abc'}}
         card = build_alert(payload)
         assert links(payload)[0].url == url
-        assert f'<a href="{url}">n8n execution</a>' in render_card(card)
+        assert f'<a href="{url}">n8n</a>' in render_card(card)
         assert card.key == 'N8nWorkflowExecutionFailed/cluster'  # no historical identity migration
 
 
 def test_most_precise_target_wins_and_annotations_are_supported():
     """Prefer execution metadata over a generic home link irrespective of its source field."""
     payload = {'generatorURL': N8N_URL, 'annotations': {'n8n_url': N8N_URL + '/workflow/abc/executions/123'}}
-    assert links(payload)[0].label == 'n8n execution'
-    assert links({'annotations': {'n8n_url': N8N_URL + '/workflow/abc'}})[0].label == 'n8n workflow'
+    assert links(payload)[0].label == 'n8n'
+    assert links({'annotations': {'n8n_url': N8N_URL + '/workflow/abc'}})[0].label == 'n8n'
 
 
 def test_explicit_ids_and_generic_workflow_id_scope():
     """Interpret generic workflow IDs only when the producer explicitly identifies n8n."""
     result = select_links({'component': 'n8n', 'workflow_id': 'abc', 'execution_id': '123'})
-    assert next(link for link in result if link.label == 'n8n execution').url.endswith('/workflow/abc/executions/123')
+    assert next(link for link in result if link.label == 'n8n').url.endswith('/workflow/abc/executions/123')
     assert select_links({'n8n_workflow_id': 'abc'}, ['n8n'])[0].url.endswith('/workflow/abc')
     assert not links({'labels': {'component': 'github', 'workflow_id': '123'}})
 
@@ -95,3 +95,27 @@ def test_invalid_id_does_not_enter_link():
     assert select_links({'n8n_workflow_id': '../../secret'}, ['n8n']) == []
     result = select_links({'n8n_workflow_id': 'abc', 'n8n_execution_id': '../secret'}, ['n8n'])
     assert result[0].url == N8N_URL + '/workflow/abc'
+
+
+@pytest.mark.parametrize('metadata', [
+    {'n8n_workflow_id': 'J9akzlydrf9XZiID', 'n8n_execution_id': '16473'},
+    {'component': 'n8n', 'workflow_id': 'J9akzlydrf9XZiID', 'execution_id': '16473'},
+    {'namespace': 'automation', 'component': 'spi-triage', 'n8n_execution_id': '16473'},
+])
+def test_execution_ids_upgrade_a_workflow_url_without_long_anchor_text(metadata):
+    """An available execution ID must not be hidden by a less precise URL."""
+    payload = {'labels': metadata, 'annotations': {'n8n_url': N8N_URL + '/workflow/J9akzlydrf9XZiID'}}
+    card = build_alert(payload)
+    link = next(link for link in card.links if link.label == 'n8n')
+    assert link.url == N8N_URL + '/workflow/J9akzlydrf9XZiID/executions/16473'
+    assert f'<a href="{link.url}">n8n</a>' in render_card(card)
+    assert 'n8n workflow' not in render_card(card)
+    assert 'n8n execution' not in render_card(card)
+
+
+def test_execution_url_still_wins_when_all_anchor_labels_are_identical():
+    """URL specificity, not the display label, determines target precedence."""
+    payload = {'generatorURL': N8N_URL + '/workflow/abc',
+               'annotations': {'n8n_url': N8N_URL + '/workflow/abc/executions/16473'}}
+    assert links(payload)[0].url.endswith('/executions/16473')
+    assert links(payload)[0].label == 'n8n'
