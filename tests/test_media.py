@@ -392,7 +392,34 @@ def test_postlease_refresh_barriers(request, monkeypatch):
         event.remove(database._engine, "before_cursor_execute", pause)
 
 
-def test_progress_transport_deadline_and_heartbeat(monkeypatch):
+@pytest.fixture
+def heartbeat_database(request, tmp_path, monkeypatch):
+    """Use independent SQLite connections for concurrent claim/heartbeat transactions.
+
+    StaticPool's single in-memory connection lets one session roll back another
+    thread's renewal. A file database exercises SQLite's real transaction locks;
+    PostgreSQL keeps the original disposable backend and all assertions remain.
+    """
+    if request.getfixturevalue("store") != "sqlite":
+        yield
+        return
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from socrat_bot import db as database
+    from socrat_bot.models import Base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'heartbeat_test.db'}")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(database, "_engine", engine)
+    monkeypatch.setattr(database, "_Session", sessionmaker(engine, expire_on_commit=False))
+    try:
+        yield
+    finally:
+        engine.dispose()
+
+
+def test_progress_transport_deadline_and_heartbeat(monkeypatch, heartbeat_database):
     prepare()
     # Allow real PostgreSQL round trips on loaded CI runners; 120 ms could
     # expire before two renewals despite a healthy heartbeat. Keep the actual

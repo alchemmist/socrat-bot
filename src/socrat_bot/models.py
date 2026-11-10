@@ -99,6 +99,23 @@ class GraphSnapshot(Base):
     render_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class GraphJob(Base):
+    """Bounded render intent; generation and lease fence all late publication."""
+    __tablename__ = "graph_jobs"
+    __table_args__ = (Index("ix_graph_jobs_due", "state", "available_at"),)
+    id: Mapped[str] = mapped_column(ForeignKey("graph_snapshots.id"), primary_key=True)
+    key: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[dict] = mapped_column(JSONType)
+    generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state: Mapped[str] = mapped_column(String(16), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
 class TelegramCard(Base):
     __tablename__ = "telegram_cards"
     message_kind: Mapped[str] = mapped_column(String(8), default="text", server_default="text")

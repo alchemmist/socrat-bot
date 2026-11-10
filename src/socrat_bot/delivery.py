@@ -36,8 +36,14 @@ def submit_card(card, custom_actions=None, images=None, *, metadata=False, prima
         if primary_graph:
             from socrat_bot.models import GraphSnapshot
             snapshot = db.get(GraphSnapshot, primary_graph)
-            if snapshot is not None and snapshot.png:
-                incident.graph_capture, incident.graph_generation = primary_graph, incident.generation
+            if snapshot is not None:
+                from socrat_bot.models import GraphJob
+                job = db.scalar(select(GraphJob).where(GraphJob.id == primary_graph).with_for_update())
+                if job is not None and job.generation is None:
+                    job.generation = incident.generation
+                if job is None or (job.generation == incident.generation
+                                   and job.payload.get("status") == incident.status):
+                    incident.graph_capture, incident.graph_generation = primary_graph, incident.generation
         from socrat_bot.media import publish
 
         publish(db, incident, images)

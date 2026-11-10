@@ -1,48 +1,16 @@
-"""Opt-in primary graph capture. Existing alert delivery never depends on rendering."""
+"""Opt-in durable graph capture; alert delivery never waits for rendering capacity."""
 
 import asyncio
 import hashlib
-import json
 import os
 import re
 import stat
 
 import httpx
-from sqlalchemy import func, select
-
-from socrat_bot.db import session
-from socrat_bot.models import GraphSnapshot, utcnow
+from sqlalchemy.exc import SQLAlchemyError
 
 GATEWAY = "http://socrat-alert-graphs.cattle-monitoring-system.svc.cluster.local:8080/v1/primary"
 MAX_BYTES = 2 * 1024 * 1024
-
-
-def _reserve(identity):
-    from socrat_bot.escalation import insert_once
-
-    with session() as db:
-        insert_once(db, GraphSnapshot, {"id": identity, "observed_at": utcnow()})
-        row = db.get(GraphSnapshot, identity)
-        return (
-            row.observed_at.isoformat()
-            if row.observed_at.tzinfo
-            else row.observed_at.isoformat() + "+00:00",
-            row.png is not None,
-        )
-
-
-def _save(identity, data, digest):
-    with session() as db:
-        row = db.scalar(
-            select(GraphSnapshot).where(GraphSnapshot.id == identity).with_for_update()
-        )
-        if row.png is not None:
-            return identity
-        total = db.scalar(select(func.sum(func.length(GraphSnapshot.png)))) or 0
-        if total + len(data) > 256 * 1024 * 1024:
-            return None
-        row.png, row.render_digest = data, digest
-        return identity
 
 
 def _token():
@@ -61,11 +29,15 @@ def _token():
 
 
 async def capture(key, alert):
+    """Persist a render intent without blocking alert delivery on Chromium capacity."""
     if os.environ.get("ALERT_GRAPHS_ENABLED", "false") != "true" or not isinstance(
         alert, dict
     ):
         return None
-    annotation = alert.get("annotations", {}).get("spi_graphs")
+    annotations = alert.get("annotations")
+    annotation = (
+        annotations.get("spi_graphs") if isinstance(annotations, dict) else None
+    )
     if not isinstance(annotation, str) or not annotation or len(annotation) > 16000:
         return None
     payload = {
@@ -73,24 +45,27 @@ async def capture(key, alert):
         "labels": alert.get("labels", {}),
         "starts_at": alert.get("startsAt"),
         "ends_at": alert.get("endsAt"),
-        "status": alert.get("status"),
+        "status": "resolved" if alert.get("status") == "resolved" else "firing",
     }
     if payload["ends_at"] and str(payload["ends_at"]).startswith("0001-"):
         payload["ends_at"] = None
     try:
+        from socrat_bot.graph_jobs import enqueue
+
         async with asyncio.timeout(5):
-            identity = hashlib.sha256(
-                json.dumps([key, payload], sort_keys=True, ensure_ascii=True).encode()
-            ).hexdigest()
-            # Persist timestamp before transport; retries request the same exact image.
-            observed, ready = await asyncio.to_thread(_reserve, identity)
-            if ready:
-                return identity
-            payload["observed_at"] = observed
-            token = await asyncio.to_thread(_token)
+            return await asyncio.to_thread(enqueue, key, payload)
+    except (OSError, ValueError, TypeError, TimeoutError, SQLAlchemyError):
+        return None
+
+
+async def fetch_png(payload):
+    """Fetch only the fixed gateway, returning safe bounded result codes, never upstream text."""
+    try:
+        token = await asyncio.to_thread(_token)
+        async with asyncio.timeout(7):
             async with (
                 httpx.AsyncClient(
-                    timeout=4, follow_redirects=False, trust_env=False
+                    timeout=6, follow_redirects=False, trust_env=False
                 ) as client,
                 client.stream(
                     "POST",
@@ -99,18 +74,25 @@ async def capture(key, alert):
                     headers={"Authorization": "Bearer " + token},
                 ) as response,
             ):
+                if response.status_code != 200:
+                    retry = response.status_code == 429 or response.status_code >= 500
+                    return (
+                        None,
+                        None,
+                        retry,
+                        "HTTP_TRANSIENT" if retry else "HTTP_REJECTED",
+                    )
                 if (
-                    response.status_code != 200
-                    or response.headers.get("content-type", "").split(";")[0]
+                    response.headers.get("content-type", "").split(";")[0]
                     != "image/png"
+                    or response.headers.get("content-encoding", "identity")
+                    != "identity"
                 ):
-                    return None
-                if response.headers.get("content-encoding", "identity") != "identity":
-                    return None
+                    return None, None, False, "INVALID_IMAGE"
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(data) + len(chunk) > MAX_BYTES:
-                        return None
+                        return None, None, False, "IMAGE_LIMIT"
                     data.extend(chunk)
                 checksum = response.headers.get("x-content-sha256", "")
                 digest = response.headers.get("x-render-digest", "")
@@ -120,7 +102,9 @@ async def capture(key, alert):
                     or hashlib.sha256(data).hexdigest() != checksum
                     or not data.startswith(b"\x89PNG\r\n\x1a\n")
                 ):
-                    return None
-            return await asyncio.to_thread(_save, identity, bytes(data), digest)
-    except (OSError, ValueError, TypeError, KeyError, TimeoutError, httpx.HTTPError):
-        return None  # No upstream exception/request text in logs or delivery responses.
+                    return None, None, False, "INVALID_IMAGE"
+                return bytes(data), digest, False, "READY"
+    except (TimeoutError, httpx.HTTPError, OSError):
+        return None, None, True, "TRANSPORT"
+    except (ValueError, TypeError, KeyError):
+        return None, None, False, "CLIENT_CONFIG"

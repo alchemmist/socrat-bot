@@ -823,11 +823,14 @@ async def lifespan(app: FastAPI):
     ticker = asyncio.create_task(_broadcast_loop())
     escalation_ticker = asyncio.create_task(outbox_loop())
     media_ticker = asyncio.create_task(media.outbox_loop())
+    from socrat_bot.graph_jobs import outbox_loop as graph_loop
+    graph_ticker = asyncio.create_task(graph_loop())
     yield
     ticker.cancel()
     escalation_ticker.cancel()
     media_ticker.cancel()
-    await asyncio.gather(media_ticker, return_exceptions=True)
+    graph_ticker.cancel()
+    await asyncio.gather(media_ticker, graph_ticker, return_exceptions=True)
     if command_ticker is not None:
         command_ticker.cancel()
         await asyncio.gather(command_ticker, return_exceptions=True)

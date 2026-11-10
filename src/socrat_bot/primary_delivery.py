@@ -1,15 +1,81 @@
 """Native photo transport adapter; durable snapshots retain the original full text."""
 
 import json
+from html.parser import HTMLParser
 
 from sqlalchemy.orm import defer
 
 from socrat_bot.models import GraphSnapshot
 
 
+class _CaptionText(HTMLParser):
+    """Count Telegram-supported HTML text; malformed/unknown markup fails closed."""
+
+    tags = frozenset(
+        {
+            "b",
+            "strong",
+            "i",
+            "em",
+            "u",
+            "ins",
+            "s",
+            "strike",
+            "del",
+            "a",
+            "code",
+            "pre",
+            "span",
+            "tg-spoiler",
+            "tg-emoji",
+            "blockquote",
+        }
+    )
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.stack, self.valid = [], [], True
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.tags:
+            self.valid = False
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if not self.stack or self.stack.pop() != tag:
+            self.valid = False
+
+    def handle_startendtag(self, tag, attrs):
+        self.valid = False
+
+    def handle_comment(self, data):
+        self.valid = False
+
+    def handle_decl(self, decl):
+        self.valid = False
+
+    def handle_pi(self, data):
+        self.valid = False
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
 def caption_units(text):
-    """Conservative Telegram UTF-16 budget, including raw markup overhead."""
-    return len(text.encode("utf-16-le")) // 2
+    """Telegram counts UTF-16 caption text after HTML entities/markup are parsed.
+
+    Keep the full original HTML for delivery. Counting href URLs as visible text
+    falsely excluded ordinary pod cards. Unknown/malformed markup retains the
+    old conservative raw-text bound rather than risking an underestimated limit.
+    """
+    parser = _CaptionText()
+    try:
+        parser.feed(text)
+        parser.close()
+        visible = "".join(parser.parts) if parser.valid and not parser.stack else text
+    except (ValueError, AssertionError):
+        visible = text
+    return len(visible.encode("utf-16-le")) // 2
 
 
 def adapt(db, incident, card, existing, method, body, snapshot):
@@ -26,8 +92,13 @@ def adapt(db, incident, card, existing, method, body, snapshot):
     )
     snapshot["_message_kind"] = "photo" if is_photo else "text"
     snapshot["_graph_capture"] = card.graph_capture if existing else None
-    # Old text messages keep their identity/type, including rollout-era fallbacks.
+    # Bot API editMessageMedia can attach media to an existing text message.
+    # Upgrade in place: keep the message ID, full caption, buttons and delivery fence.
     if existing and not is_photo:
+        if capture and caption_units(body["text"]) <= 768 and capture.png:
+            body["_graph_data"] = capture.png
+            snapshot["_message_kind"], snapshot["_graph_capture"] = "photo", capture.id
+            return "editMessageMedia", body
         return method, body
     if is_photo and caption_units(body["text"]) > 1024:
         # Telegram cannot turn a photo into arbitrary-length text. Preserve the

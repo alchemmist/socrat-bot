@@ -51,7 +51,7 @@ def test_sqlite_populated_upstream_desired_fence_upgrade_and_downgrade(tmp_path)
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0017_primary_graph"
+            == "0018_graph_jobs"
         )
     engine.dispose()
 
@@ -128,4 +128,29 @@ def test_populated_mailing_copy_timestamp_migration(tmp_path, backend):
                 assert connection.scalar(text("SELECT sent_at FROM broadcast_copies")) is not None
                 assert str(connection.scalar(text("SELECT entities FROM broadcasts"))) == "[]"
                 assert str(connection.scalar(text("SELECT applied_entities FROM broadcast_copies"))) == "[]"
+    engine.dispose()
+
+
+def test_graph_queue_migration_preserves_pngs_without_backfill(tmp_path):
+    """An additive queue must not mutate snapshots or enqueue historical Telegram edits."""
+    import hashlib
+
+    url = f"sqlite+pysqlite:///{tmp_path / 'graph_migration_test.db'}"
+    env = dict(os.environ, DATABASE_URL=url, PYTHONPATH=str(Path('src').resolve()))
+    command = [sys.executable, '-m', 'alembic', 'upgrade']
+    subprocess.run(command + ['0017_primary_graph'], env=env, capture_output=True, check=True)
+    engine = create_engine(url)
+    png = b'preserved-historical-png-fixture'
+    checksum = hashlib.sha256(png).hexdigest()
+    with engine.begin() as connection:
+        connection.execute(text(
+            'INSERT INTO graph_snapshots (id,observed_at,png,render_digest) '
+            'VALUES (:id,CURRENT_TIMESTAMP,:png,:digest)'
+        ), {'id': 'a' * 64, 'png': png, 'digest': checksum})
+    subprocess.run(command + ['head'], env=env, capture_output=True, check=True)
+    with engine.connect() as connection:
+        row = connection.execute(text('SELECT png,render_digest FROM graph_snapshots')).one()
+        assert hashlib.sha256(row.png).hexdigest() == checksum == row.render_digest
+        assert connection.scalar(text('SELECT count(*) FROM graph_jobs')) == 0
+        assert connection.scalar(text('SELECT count(*) FROM alert_outbox')) == 0
     engine.dispose()
