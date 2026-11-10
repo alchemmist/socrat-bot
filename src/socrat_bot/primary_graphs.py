@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import stat
@@ -11,6 +12,39 @@ from sqlalchemy.exc import SQLAlchemyError
 
 GATEWAY = "http://socrat-alert-graphs.cattle-monitoring-system.svc.cluster.local:8080/v1/primary"
 MAX_BYTES = 2 * 1024 * 1024
+GATEWAY_CODES = frozenset(
+    {
+        "BUSY",
+        "RENDER_TIMEOUT",
+        "RENDER_FAILED",
+        "MISSING_LABEL",
+        "PANEL_NOT_ALLOWED",
+        "INVALID_SPEC",
+        "INVALID_TIMESTAMP",
+        "MISSING_GRAPH",
+        "IMAGE_LIMIT",
+    }
+)
+
+
+async def error_code(response, fallback):
+    """Read at most 256 error bytes and expose only reviewed gateway enum values."""
+    if (
+        response.headers.get("content-type", "").split(";")[0] != "application/json"
+        or response.headers.get("content-encoding", "identity") != "identity"
+    ):
+        return fallback
+    raw = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(raw) + len(chunk) > 256:
+            return fallback
+        raw.extend(chunk)
+    try:
+        obj = json.loads(raw)
+        code = obj.get("code") if isinstance(obj, dict) else None
+        return code if isinstance(code, str) and code in GATEWAY_CODES else fallback
+    except (ValueError, UnicodeError):
+        return fallback
 
 
 def _token():
@@ -61,11 +95,11 @@ async def capture(key, alert):
 async def fetch_png(payload):
     """Fetch only the fixed gateway, returning safe bounded result codes, never upstream text."""
     try:
-        token = await asyncio.to_thread(_token)
-        async with asyncio.timeout(7):
+        async with asyncio.timeout(20):
+            token = await asyncio.to_thread(_token)
             async with (
                 httpx.AsyncClient(
-                    timeout=6, follow_redirects=False, trust_env=False
+                    timeout=18, follow_redirects=False, trust_env=False
                 ) as client,
                 client.stream(
                     "POST",
@@ -80,7 +114,9 @@ async def fetch_png(payload):
                         None,
                         None,
                         retry,
-                        "HTTP_TRANSIENT" if retry else "HTTP_REJECTED",
+                        await error_code(
+                            response, "HTTP_TRANSIENT" if retry else "HTTP_REJECTED"
+                        ),
                     )
                 if (
                     response.headers.get("content-type", "").split(";")[0]

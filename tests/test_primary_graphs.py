@@ -531,3 +531,99 @@ def test_new_incident_generation_rejects_old_graph_owner(monkeypatch):
     with session() as db:
         assert db.get(GraphJob, identity).state == "superseded"
         assert db.get(GraphSnapshot, identity).png is None
+
+
+def test_render_deadline_and_lease_cover_gateway_budget(monkeypatch):
+    """The client and owner lease must outlive the gateway's bounded 15-second render."""
+    from contextlib import asynccontextmanager
+
+    from socrat_bot import graph_jobs, primary_graphs
+
+    seen = []
+    real_timeout = asyncio.timeout
+
+    @asynccontextmanager
+    async def timeout(seconds):
+        seen.append(seconds)
+        async with real_timeout(seconds):
+            yield
+
+    monkeypatch.setattr(primary_graphs.asyncio, "timeout", timeout)
+    monkeypatch.setattr(primary_graphs, "_token", lambda: "synthetic-token-only")
+
+    def client(**kw):
+        assert kw["timeout"] == 18
+        return REAL_CLIENT(
+            transport=httpx.MockTransport(lambda request: gateway_response()), **kw
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    result = asyncio.run(primary_graphs.fetch_png({}))
+    assert result[0] == PNG and seen == [20]
+    assert graph_jobs.LEASE_SECONDS >= 20 + 2 * 5 + 10
+
+
+def test_gateway_reason_survives_expiration_without_raw_error_storage(monkeypatch):
+    """Keep the actual bounded error instead of overwriting it with a generic age label."""
+    from datetime import timedelta
+
+    from socrat_bot import graph_jobs, primary_graphs
+    from socrat_bot.models import GraphJob, utcnow
+
+    identity = queue_graph(monkeypatch)
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: REAL_CLIENT(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    503, json={"code": "RENDER_TIMEOUT", "private": "never stored"}
+                )
+            ),
+            **kw,
+        ),
+    )
+    result = asyncio.run(primary_graphs.fetch_png({}))
+    assert result == (None, None, True, "RENDER_TIMEOUT")
+    work = graph_jobs.claim()
+    assert not graph_jobs.finish(work, result)
+    with session() as db:
+        row = db.get(GraphJob, identity)
+        row.created_at = utcnow() - timedelta(seconds=graph_jobs.MAX_AGE + 1)
+        row.available_at = utcnow()
+    assert graph_jobs.claim() is None
+    with session() as db:
+        row = db.get(GraphJob, identity)
+        assert row.state == "expired" and row.last_code == "RENDER_TIMEOUT"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"code": "untrusted-error-URL-or-secret"},
+        {"code": ["BUSY"]},
+        {"code": "BUSY", "overflow": "x" * 300},
+        [],
+    ],
+)
+def test_gateway_error_projection_is_bounded_and_allowlisted(monkeypatch, body):
+    """Untrusted response text cannot enter the durable diagnostic field or logs."""
+    from socrat_bot import primary_graphs
+
+    monkeypatch.setattr(primary_graphs, "_token", lambda: "synthetic-token-only")
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: REAL_CLIENT(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(503, json=body)
+            ),
+            **kw,
+        ),
+    )
+    assert asyncio.run(primary_graphs.fetch_png({})) == (
+        None,
+        None,
+        True,
+        "HTTP_TRANSIENT",
+    )

@@ -23,12 +23,12 @@ media: <https://core.telegram.org/bots/api#editmessagemedia>.
 
 - At most 128 pending render intents, 12 attempts and 10 minutes per intent.
 - Immutable observation time; duplicate requests never reset attempts or age.
-- 30-second owner lease; another process can recover it after restart. Every
+- 45-second owner lease; another process can recover it after restart. Every
   completion checks owner, lease, incident generation, status and desired capture.
 - Temporary gateway/transport errors back off (2–30 seconds). Permanent 4xx,
   invalid/oversized images and exhausted budgets retain the full text fallback.
 - Fixed credential-isolated gateway; redirects and ambient proxies disabled.
-  Per-attempt total transport deadline 7s, streamed PNG limit 2MiB, checksum and
+  Per-attempt total transport deadline 20s, streamed PNG limit 2MiB, checksum and
   render-digest validation. Existing aggregate PNG budget remains 256MiB.
 - Queue operations have PostgreSQL transaction-local lock/statement timeouts.
   Stored/logged failure codes are bounded identifiers, never upstream exceptions,
@@ -53,3 +53,11 @@ same-ID conversion, HTML captions, stale generations/owners, restart recovery,
 queue/storage/age/attempt limits and preservation of complete text. The additive
 migration test verifies existing PNG bytes survive and historical queues stay empty.
 Checks are declared in `qg.yaml`; generated workflows must not be edited manually.
+
+
+The gateway itself must allow 15 seconds for Telegram rendering; increasing only
+client retries cannot repair its former hard 4-second server deadline. Gateway
+errors are recorded as bounded known enum codes (e.g. `RENDER_FAILED`) and remain
+available when an intent expires; raw response text is never stored or logged.
+The stateless gateway can be released independently using the full SPI image's
+explicit `alert-graphs` target, without replacing stateful SPI workers.

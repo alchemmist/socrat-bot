@@ -23,7 +23,7 @@ MAX_STORED_BYTES = 256 * 1024 * 1024
 MAX_PENDING = 128
 MAX_ATTEMPTS = 12
 MAX_AGE = 600
-LEASE_SECONDS = 30
+LEASE_SECONDS = 45
 _lock = threading.Lock()
 log = logging.getLogger(__name__)
 
@@ -107,7 +107,8 @@ def claim():
             aware(job.created_at) + timedelta(seconds=MAX_AGE) <= now
             or job.attempts >= MAX_ATTEMPTS
         ):
-            job.state, job.last_code = "expired", "BUDGET_EXHAUSTED"
+            job.state = "expired"
+            job.last_code = job.last_code or "BUDGET_EXHAUSTED"
             return None
         if (
             incident is None
@@ -159,7 +160,8 @@ def finish(work, result):
             job.state, job.last_code = "superseded", "SUPERSEDED"
             return False
         if aware(job.created_at) + timedelta(seconds=MAX_AGE) <= now:
-            job.state, job.last_code = "expired", "BUDGET_EXHAUSTED"
+            job.state = "expired"
+            job.last_code = job.last_code or "BUDGET_EXHAUSTED"
             return False
         job.last_code = code
         if data is None:
