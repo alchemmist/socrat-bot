@@ -129,3 +129,28 @@ def test_request_failure_diagnostics_do_not_serialize_exception():
     assert kwargs['extra']['status'] == 500
     assert kwargs['extra']['component'] == 'broker'
     assert 'private' not in str(kwargs)
+
+
+def test_card_delivery_diagnostics_are_bounded_and_do_not_serialize_payloads():
+    record = logging.LogRecord(SERVICE, logging.INFO, '', 1, 'card delivery', (), None)
+    record.kind = 'spi'
+    record.method = 'editMessageCaption'
+    record.outcome = 'accepted'
+    record.generation = 1
+    record.revision = 2
+    record.link_revision = 3
+    record.button_count = 4
+    record.card_ref = 'a' * 20
+    record.chat_id = 123456
+    record.payload = {'callback_data': 'secret'}
+    data = json.loads(JsonFormatter().format(record))
+    assert data['kind'] == 'spi' and data['button_count'] == 4
+    assert data['card_ref'] == 'a' * 20
+    assert 'secret' not in json.dumps(data) and 'chat_id' not in data
+    for field in ('kind', 'method', 'outcome', 'card_ref', 'revision'):
+        setattr(record, field, 'secret')
+    record.generation = -1
+    record.link_revision = 2**64
+    record.button_count = True
+    data = json.loads(JsonFormatter().format(record))
+    assert set(data) == {'ts', 'level', 'service', 'msg'}

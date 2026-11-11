@@ -2,12 +2,13 @@
 import json
 import logging
 import math
+import re
 import sys
 import time
 from datetime import datetime, timezone
 
 SERVICE = 'socrat-bot'
-EVENTS = {'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
+EVENTS = {'card delivery', 'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
 
 
 class JsonFormatter(logging.Formatter):
@@ -38,6 +39,23 @@ class JsonFormatter(logging.Formatter):
                 value = getattr(record, key, None)
                 if type(value) in (int, float) and math.isfinite(value):
                     data[key] = value
+        if message == "card delivery":
+            choices = {
+                "kind": {"card", "spi", "notice", "retire"},
+                "method": {"sendMessage", "sendPhoto", "editMessageText", "editMessageCaption", "editMessageMedia", "editMessageReplyMarkup"},
+                "outcome": {"fenced", "accepted", "rejected", "uncertain"},
+            }
+            for key, allowed in choices.items():
+                value = getattr(record, key, None)
+                if isinstance(value, str) and value in allowed:
+                    data[key] = value
+            for key in ("generation", "revision", "link_revision", "button_count"):
+                value = getattr(record, key, None)
+                if type(value) is int and 0 <= value <= 2**63 - 1:
+                    data[key] = value
+            ref = getattr(record, "card_ref", None)
+            if isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{20}", ref):
+                data["card_ref"] = ref
         return json.dumps(data, separators=(",", ":"), allow_nan=False)
 
 

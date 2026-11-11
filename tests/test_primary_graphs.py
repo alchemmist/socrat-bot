@@ -627,3 +627,132 @@ def test_gateway_error_projection_is_bounded_and_allowlisted(monkeypatch, body):
         True,
         "HTTP_TRANSIENT",
     )
+
+
+@pytest.mark.parametrize("photo", [False, True])
+@pytest.mark.parametrize("terminal", [None, "mute", "resolved", "old_generation"])
+def test_versioned_spi_retries_rebuild_current_keyboard(monkeypatch, photo, terminal):
+    from socrat_bot.delivery import publish_spi
+    from socrat_bot.models import Incident
+
+    mock_transport(monkeypatch)
+    seed()
+    if not photo:
+        with session() as db:
+            db.get(Incident, "graph").graph_capture = None
+    initial = deliver()
+    expected = initial[2]["reply_markup"]
+    assert expected["inline_keyboard"]
+    if terminal == "mute":
+        annotate_card("graph", mute="<i>Muted 15m</i>")
+        deliver()
+    elif terminal == "resolved":
+        submit_card(Card(key="graph", title="Latency", status="resolved"))
+        deliver()
+    elif terminal == "old_generation":
+        with session() as db:
+            db.get(Incident, "graph").generation += 1
+    with session() as db:
+        message_id = db.get(TelegramCard, ("graph", 1)).message_id
+    for revision in (1, 1, 2):
+        _, jobs = publish_spi(
+            "graph", f"https://github.com/alchemmist/homelab/issues/{revision}",
+            "SPI", revision, [{"chat_id": 1, "message_id": message_id}],
+        )
+        work = prepare_work(jobs[0])
+        assert work is not None
+        assert work[1] == ("editMessageCaption" if photo else "editMessageText")
+        assert work[2]["message_id"] == message_id
+        assert work[2]["reply_markup"] == (
+            {"inline_keyboard": []} if terminal else expected
+        )
+        assert asyncio.run(_deliver_work(work))
+
+
+def test_spi_photo_overflow_replacement_keeps_keyboard_and_retires_photo(monkeypatch):
+    from socrat_bot.delivery import publish_spi
+    from socrat_bot.models import CardDelivery
+
+    mock_transport(monkeypatch)
+    seed()
+    first = deliver()
+    expected = first[2]["reply_markup"]
+    with session() as db:
+        # Simulate an accepted long link label / note in the desired SPI snapshot.
+        state = db.get(CardDelivery, ("graph", 1))
+        state.text += "\n" + "x" * 1100
+        message_id = db.get(TelegramCard, ("graph", 1)).message_id
+    _, jobs = publish_spi(
+        "graph", "https://github.com/alchemmist/homelab/issues/9", "SPI", 1,
+        [{"chat_id": 1, "message_id": message_id}],
+    )
+    work = prepare_work(jobs[0])
+    assert work[1] == "sendMessage"
+    assert work[2]["reply_markup"] == expected
+    assert "x" * 1100 in work[2]["text"]
+    assert asyncio.run(_deliver_work(work))
+    retirement = deliver()
+    assert retirement[1] == "editMessageReplyMarkup"
+    assert retirement[2]["reply_markup"] == {"inline_keyboard": []}
+    assert retirement[2]["message_id"] == message_id
+
+
+def test_spi_and_note_graph_replacement_keep_custom_keyboard(monkeypatch):
+    from socrat_bot.delivery import publish_spi
+
+    mock_transport(monkeypatch)
+    seed()
+    initial = deliver()
+    expected = initial[2]["reply_markup"]
+    annotate_card("graph", note="Reviewed safely")
+    assert deliver()[2]["reply_markup"] == expected
+    with session() as db:
+        db.add(GraphSnapshot(id="b" * 64, png=PNG + b"new", render_digest="d" * 64))
+        from socrat_bot.models import Incident
+        db.get(Incident, "graph").graph_capture = "b" * 64
+        message_id = db.get(TelegramCard, ("graph", 1)).message_id
+    _, jobs = publish_spi(
+        "graph", "https://github.com/alchemmist/homelab/issues/9", "SPI", 1,
+        [{"chat_id": 1, "message_id": message_id}],
+    )
+    work = prepare_work(jobs[0])
+    assert work[1] == "editMessageMedia"
+    assert work[2]["reply_markup"] == expected
+    assert "Reviewed safely" in work[2]["text"]
+    assert asyncio.run(_deliver_work(work))
+
+
+@pytest.mark.parametrize("policy", ["eligible", "final", "disabled", "insufficient"])
+def test_spi_text_photo_upgrade_rebuilds_escalation_policy(monkeypatch, policy):
+    from socrat_bot.delivery import publish_spi
+    from socrat_bot.models import Incident
+
+    mock_transport(monkeypatch)
+    seed()
+    with session() as db:
+        db.get(Incident, "graph").graph_capture = None
+    deliver()
+    with session() as db:
+        incident = db.get(Incident, "graph")
+        incident.graph_capture = "a" * 64
+        if policy == "final":
+            incident.level = 10
+        elif policy in {"disabled", "insufficient"}:
+            from sqlalchemy import select
+            user = db.scalar(select(User).where(User.telegram_id == 1))
+            if policy == "disabled":
+                user.alerts_enabled = False
+            else:
+                user.admin_level = 30
+        message_id = db.get(TelegramCard, ("graph", 1)).message_id
+    _, jobs = publish_spi(
+        "graph", "https://github.com/alchemmist/homelab/issues/9", "SPI", 1,
+        [{"chat_id": 1, "message_id": message_id}],
+    )
+    work = prepare_work(jobs[0])
+    assert work[1] == "editMessageMedia"
+    assert work[2]["message_id"] == message_id
+    buttons = [b for row in work[2]["reply_markup"]["inline_keyboard"] for b in row]
+    assert any(b["text"].startswith("Mute") for b in buttons)
+    assert any(b["text"] == "Escalate" for b in buttons) == (policy == "eligible")
+    assert asyncio.run(_deliver_work(work))

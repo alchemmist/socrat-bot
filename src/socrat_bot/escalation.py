@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import uuid
 from datetime import timedelta
@@ -509,15 +510,15 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
         ):
             discard()
             return None
-        if p["kind"] == "spi":
-            # Always confirm retry via idempotent edit; desired state is not delivery acknowledgement.
-            body = {"chat_id": p["chat_id"], "message_id": card.message_id,
-                    "text": text, "parse_mode": "HTML"}
-            method, body = adapt_primary(db, incident, card, existing, "editMessageText", body, p)
-            return row.id, method, body, p
+        # All primary mutations share desired keyboard construction, including SPI
+        # retries. Equal text is not proof that Telegram still has the keyboard.
         rows = []
         # Preserve the existing mute policy: a muted card has no buttons.
-        if incident.status == "firing" and "<i>" not in text:
+        if (
+            incident.status == "firing"
+            and incident.generation == p["generation"]
+            and "<i>" not in text
+        ):
             if not existing:
                 source_actions = list(
                     db.scalars(
@@ -660,10 +661,12 @@ async def _deliver_work(work: Work) -> bool:
 
     ticker = asyncio.create_task(heartbeat())
     definite_rejection = False
+    outcome = "uncertain"
     try:
         if not await asyncio.to_thread(renew_lease, p) or not await asyncio.to_thread(
             authorize_http, work
         ):
+            outcome = "fenced"
             return False
         async with httpx.AsyncClient(timeout=20) as client:
             response = await post_primary(client,
@@ -673,11 +676,14 @@ async def _deliver_work(work: Work) -> bool:
                 definite_rejection = True
                 raise RuntimeError("Telegram delivery rejected")
 
-        return await asyncio.to_thread(finish_work, work, data)
+        accepted = await asyncio.to_thread(finish_work, work, data)
+        outcome = "accepted" if accepted else "fenced"
+        return accepted
     except Exception:  # noqa: BLE001 - durable retry boundary; never log token-bearing HTTP errors
         # Definite rejection is safe to retry immediately. Ambiguous transport failures
         # retain their lease: Telegram may already have accepted the send.
         if definite_rejection:
+            outcome = "rejected"
 
             def release():
                 with session() as db:
@@ -696,6 +702,13 @@ async def _deliver_work(work: Work) -> bool:
             await asyncio.to_thread(release)
         return False
     finally:
+        logging.getLogger("socrat-bot").info("card delivery", extra={
+            "kind": p["kind"], "method": method, "outcome": outcome,
+            "generation": p["generation"], "revision": p.get("_revision", 0),
+            "link_revision": p.get("_link_revision", 0),
+            "button_count": sum(len(row) for row in body.get("reply_markup", {}).get("inline_keyboard", [])),
+            "card_ref": token(p["key"]),
+        })
         ticker.cancel()
         await asyncio.gather(ticker, return_exceptions=True)
 
