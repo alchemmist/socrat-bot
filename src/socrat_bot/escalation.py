@@ -702,13 +702,16 @@ async def _deliver_work(work: Work) -> bool:
             await asyncio.to_thread(release)
         return False
     finally:
-        logging.getLogger("socrat-bot").info("card delivery", extra={
-            "kind": p["kind"], "method": method, "outcome": outcome,
-            "generation": p["generation"], "revision": p.get("_revision", 0),
-            "link_revision": p.get("_link_revision", 0),
-            "button_count": sum(len(row) for row in body.get("reply_markup", {}).get("inline_keyboard", [])),
-            "card_ref": token(p["key"]),
-        })
+        try:
+            logging.getLogger("socrat-bot").info("card delivery", extra={
+                "kind": p["kind"], "method": method, "outcome": outcome,
+                "generation": p["generation"], "revision": p.get("_revision", 0),
+                "link_revision": p.get("_link_revision", 0),
+                "button_count": sum(len(row) for row in body.get("reply_markup", {}).get("inline_keyboard", [])),
+                "card_ref": token(p["key"]),
+            })
+        except Exception:  # noqa: BLE001, S110 - diagnostics must not affect delivery or cleanup
+            pass
         ticker.cancel()
         await asyncio.gather(ticker, return_exceptions=True)
 

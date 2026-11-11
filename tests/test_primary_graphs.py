@@ -756,3 +756,26 @@ def test_spi_text_photo_upgrade_rebuilds_escalation_policy(monkeypatch, policy):
     assert any(b["text"].startswith("Mute") for b in buttons)
     assert any(b["text"] == "Escalate" for b in buttons) == (policy == "eligible")
     assert asyncio.run(_deliver_work(work))
+
+
+def test_delivery_diagnostic_failure_preserves_result_and_cleans_heartbeat(monkeypatch):
+    import logging
+
+    mock_transport(monkeypatch)
+    seed()
+    work = prepare_work()
+    assert work is not None
+
+    def broken_log(*args, **kwargs):
+        raise RuntimeError("diagnostic handler failed")
+
+    monkeypatch.setattr(logging.getLogger("socrat-bot"), "info", broken_log)
+
+    async def run():
+        before = asyncio.all_tasks()
+        assert await _deliver_work(work)
+        assert not (asyncio.all_tasks() - before)
+
+    asyncio.run(run())
+    with session() as db:
+        assert db.get(TelegramCard, ("graph", 1)).message_id is not None
