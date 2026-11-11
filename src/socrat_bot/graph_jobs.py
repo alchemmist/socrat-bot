@@ -182,6 +182,9 @@ def finish(work, result):
                 job.state, job.last_code = "failed", "STORAGE_LIMIT"
                 return False
             snapshot.png, snapshot.render_digest = data, digest
+            from socrat_bot.graph_source import chart_url
+
+            snapshot.chart_url = chart_url(job.payload, digest)
         job.state, job.last_code = "ready", "READY"
         recipients = list(
             db.scalars(

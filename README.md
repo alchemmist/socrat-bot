@@ -372,3 +372,32 @@ returns `(recipients, jobs, snapshot)` for generation-bound reporting.
 Media renews its owner-fenced 60-second lease every five seconds and enforces a
 20-second total HTTP deadline. Ambiguous failures/cancellation retain a finite
 lease; lost responses can still cause duplicate Telegram photos on retry.
+
+### Captured graph links
+
+Native gateway graph photos carry an additive **Chart** link on the links row
+without consuming `ALERT_LINK_LIMIT` or replacing Alert/Node/Rancher/etc.
+`nodes` remains the backward-compatible provider key; its visible label is **Node**.
+The link is an interactive Grafana single-panel URL on the fixed trusted
+`https://grafana.socrat.alchemmist.xyz` origin, with the actual capture's fixed
+from/to milliseconds, UTC, light theme and resolved `var-*` bindings. Grafana
+authentication remains required; no credentials are copied into links.
+
+Gateway `/v1/primary` currently selects the first **validated** declaration from
+`spi_graphs` and resolves it with the persisted job `observed_at` (Telegram
+purpose). `graph_contract.py` mirrors the read-only SPI contract at commit
+`d5ab410bf8e3fa60757e09065e553da5de0b4a1c`. Provenance is accepted only when the
+reconstructed canonical SHA256 matches `X-Render-Digest`; the client additionally
+requires matching `X-Graph-From`, `X-Graph-To`, and `X-Graph-Mode`. Drift/missing
+source metadata omits Chart but does not reject an otherwise verified PNG.
+No caller-provided image URLs or inline images are assigned guessed provenance.
+
+Migration `0019_graph_source` adds nullable `graph_snapshots.chart_url`; existing
+snapshots remain NULL (no invented backfill, historical repair or sends). Source
+metadata is persisted in the same fenced transaction as its PNG. Delivery uses
+the applied photo capture, preserving the old Chart while a newer capture is
+pending/failed, and swapping URL and image in one `editMessageMedia`. SPI, notes
+and mute projections replace the single owned Chart rather than accumulating
+it. Caption budgets include Chart's visible UTF-16 units; photo-to-text fallback
+omits Chart. Public request/serializer contracts are unchanged: clients cannot
+submit screenshot provenance.

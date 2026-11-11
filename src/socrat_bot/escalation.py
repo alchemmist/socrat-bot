@@ -24,6 +24,7 @@ from socrat_bot.models import (
 )
 from socrat_bot.primary_delivery import adapt as adapt_primary
 from socrat_bot.primary_delivery import post as post_primary
+from socrat_bot.primary_delivery import without_chart
 
 Work = tuple[uuid.UUID, str, dict, dict]
 
@@ -504,7 +505,7 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             p["kind"] != "spi"
             and existing
             and state.delivered_revision >= state.revision
-            and card.text == text
+            and without_chart(card.text) == without_chart(text)
             and card.status == incident.status
             and (card.message_kind != "photo" or incident.graph_generation != incident.generation or not incident.graph_capture or card.graph_capture == incident.graph_capture)
         ):

@@ -1,6 +1,8 @@
 """Native photo transport adapter; durable snapshots retain the original full text."""
 
 import json
+import re
+from html import escape
 from html.parser import HTMLParser
 
 from sqlalchemy.orm import defer
@@ -78,6 +80,15 @@ def caption_units(text):
     return len(visible.encode("utf-16-le")) // 2
 
 
+def without_chart(text):
+    """Remove only the bot-owned provenance projection before re-rendering."""
+    return re.sub(
+        r'(?: · )?<a href="https://grafana\.socrat\.alchemmist\.xyz/d-solo/[^"<>]*">Chart</a>',
+        "",
+        text or "",
+    ).rstrip("\n")
+
+
 def adapt(db, incident, card, existing, method, body, snapshot):
     is_photo = bool(existing and card.message_kind == "photo")
     desired = (
@@ -90,6 +101,30 @@ def adapt(db, incident, card, existing, method, body, snapshot):
         if desired
         else None
     )
+    # Attach provenance only for the image selected by this very transport edit.
+    selected = (
+        capture
+        if capture and capture.png
+        else (
+            db.get(GraphSnapshot, card.graph_capture)
+            if is_photo and card.graph_capture
+            else None
+        )
+    )
+    # Applied text can feed later note/mute/SPI projections. Replace our owned
+    # provenance link rather than accumulating copies or retaining a stale URL.
+    original_text = without_chart(body["text"])
+    body["text"] = original_text
+    if selected and selected.chart_url:
+        link = '<a href="' + escape(selected.chart_url, quote=True) + '">Chart</a>'
+        lines = original_text.split("\n")
+        for index, line in enumerate(lines):
+            if '<a href="' in line:
+                lines[index] += " · " + link
+                break
+        else:
+            lines.append(link)
+        body["text"] = "\n".join(lines)
     snapshot["_message_kind"] = "photo" if is_photo else "text"
     snapshot["_graph_capture"] = card.graph_capture if existing else None
     # Bot API editMessageMedia can attach media to an existing text message.
@@ -99,12 +134,14 @@ def adapt(db, incident, card, existing, method, body, snapshot):
             body["_graph_data"] = capture.png
             snapshot["_message_kind"], snapshot["_graph_capture"] = "photo", capture.id
             return "editMessageMedia", body
+        body["text"] = original_text
         return method, body
     if is_photo and caption_units(body["text"]) > 1024:
         # Telegram cannot turn a photo into arbitrary-length text. Preserve the
         # complete text as the new primary, retire old buttons AFTER acceptance.
         snapshot["_supersedes_photo"] = card.message_id
         snapshot["_message_kind"], snapshot["_graph_capture"] = "text", None
+        body["text"] = original_text
         body = {k: v for k, v in body.items() if k != "message_id"}
         return "sendMessage", body
     if is_photo:
@@ -119,6 +156,7 @@ def adapt(db, incident, card, existing, method, body, snapshot):
         body["_graph_data"] = capture.png
         snapshot["_message_kind"], snapshot["_graph_capture"] = "photo", capture.id
         return "sendPhoto", body
+    body["text"] = original_text
     return method, body
 
 

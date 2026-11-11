@@ -139,6 +139,26 @@ async def fetch_png(payload):
                     or not data.startswith(b"\x89PNG\r\n\x1a\n")
                 ):
                     return None, None, False, "INVALID_IMAGE"
+                from socrat_bot.graph_contract import parse_annotation, resolve
+
+                try:
+                    resolved = resolve(
+                        parse_annotation(payload["annotation"])[0],
+                        payload["labels"],
+                        starts_at=payload["starts_at"],
+                        observed_at=payload["observed_at"],
+                        ends_at=payload["ends_at"],
+                        status=payload["status"],
+                    )
+                    for header, key in (
+                        ("x-graph-from", "from_ms"),
+                        ("x-graph-to", "to_ms"),
+                        ("x-graph-mode", "mode"),
+                    ):
+                        if response.headers.get(header) != str(resolved[key]):
+                            digest = None
+                except (ValueError, TypeError, KeyError, IndexError):
+                    digest = None
                 return bytes(data), digest, False, "READY"
     except (TimeoutError, httpx.HTTPError, OSError):
         return None, None, True, "TRANSPORT"

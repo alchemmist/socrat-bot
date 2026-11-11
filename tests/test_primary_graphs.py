@@ -28,7 +28,14 @@ def seed():
                 receive_level=20,
             )
         )
-        db.add(GraphSnapshot(id="a" * 64, png=PNG, render_digest="c" * 64))
+        db.add(
+            GraphSnapshot(
+                id="a" * 64,
+                png=PNG,
+                render_digest="c" * 64,
+                chart_url="https://grafana.socrat.alchemmist.xyz/d-solo/node/_?panelId=17",
+            )
+        )
     submit_card(
         Card(key="graph", title="Latency", summary="Existing text"),
         primary_graph="a" * 64,
@@ -59,6 +66,11 @@ def deliver():
         if work is not None:
             break
     assert work is not None
+    if (
+        work[1] in ("sendPhoto", "editMessageMedia", "editMessageCaption")
+        and "Chart" in work[2]["text"]
+    ):
+        assert work[2]["text"].count(">Chart</a>") == 1
     assert asyncio.run(_deliver_work(work))
     return work
 
@@ -69,6 +81,7 @@ def test_one_primary_photo_with_original_text_buttons_and_no_reply(monkeypatch):
     work = deliver()
     assert work[1] == "sendPhoto"
     assert "Existing text" in work[2]["text"]
+    assert ">Chart</a>" in work[2]["text"]
     assert work[2]["reply_markup"]["inline_keyboard"]
     assert len(calls) == 1
     assert calls[0].url.path.endswith("/sendPhoto")
@@ -92,6 +105,7 @@ def test_spi_link_and_mute_update_same_photo(monkeypatch):
     assert deliver()[1] == "editMessageCaption"
     assert json.loads(calls[-1].content)["message_id"] == 101
     assert "issues/123" in json.loads(calls[-1].content)["caption"]
+    assert json.loads(calls[-1].content)["caption"].count(">Chart</a>") == 1
     annotate_card("graph", mute="<i>Muted 15m</i>")
     work = deliver()
     assert work[1] == "editMessageCaption"
@@ -105,7 +119,12 @@ def test_resolved_replaces_graph_and_removes_buttons(monkeypatch):
     deliver()
     with session() as db:
         db.add(
-            GraphSnapshot(id="b" * 64, png=PNG + b"resolved", render_digest="d" * 64)
+            GraphSnapshot(
+                id="b" * 64,
+                png=PNG + b"resolved",
+                render_digest="d" * 64,
+                chart_url="https://grafana.socrat.alchemmist.xyz/d-solo/node/_?panelId=17&from=1767227400000&to=1767229500000",
+            )
         )
     submit_card(
         Card(key="graph", title="Latency", status="resolved"), primary_graph="b" * 64
@@ -115,6 +134,8 @@ def test_resolved_replaces_graph_and_removes_buttons(monkeypatch):
     assert work[2]["message_id"] == 101
     assert work[2]["reply_markup"]["inline_keyboard"] == []
     assert b"resolved" in calls[-1].content
+    assert "from=1767227400000" in work[2]["text"]
+    assert work[2]["text"].count(">Chart</a>") == 1
     with session() as db:
         row = db.get(TelegramCard, ("graph", 1))
         assert row.status == "resolved" and row.graph_capture == "b" * 64
@@ -124,7 +145,14 @@ def test_long_initial_text_falls_back_without_truncating(monkeypatch):
     calls = mock_transport(monkeypatch)
     with session() as db:
         db.add(User(telegram_id=1, role="owner", alerts_enabled=True, receive_level=20))
-        db.add(GraphSnapshot(id="a" * 64, png=PNG, render_digest="c" * 64))
+        db.add(
+            GraphSnapshot(
+                id="a" * 64,
+                png=PNG,
+                render_digest="c" * 64,
+                chart_url="https://grafana.socrat.alchemmist.xyz/d-solo/node/_?panelId=17",
+            )
+        )
     submit_card(
         Card(key="graph", title="Latency", summary="x" * 2000), primary_graph="a" * 64
     )
@@ -656,8 +684,11 @@ def test_versioned_spi_retries_rebuild_current_keyboard(monkeypatch, photo, term
         message_id = db.get(TelegramCard, ("graph", 1)).message_id
     for revision in (1, 1, 2):
         _, jobs = publish_spi(
-            "graph", f"https://github.com/alchemmist/homelab/issues/{revision}",
-            "SPI", revision, [{"chat_id": 1, "message_id": message_id}],
+            "graph",
+            f"https://github.com/alchemmist/homelab/issues/{revision}",
+            "SPI",
+            revision,
+            [{"chat_id": 1, "message_id": message_id}],
         )
         work = prepare_work(jobs[0])
         assert work is not None
@@ -683,7 +714,10 @@ def test_spi_photo_overflow_replacement_keeps_keyboard_and_retires_photo(monkeyp
         state.text += "\n" + "x" * 1100
         message_id = db.get(TelegramCard, ("graph", 1)).message_id
     _, jobs = publish_spi(
-        "graph", "https://github.com/alchemmist/homelab/issues/9", "SPI", 1,
+        "graph",
+        "https://github.com/alchemmist/homelab/issues/9",
+        "SPI",
+        1,
         [{"chat_id": 1, "message_id": message_id}],
     )
     work = prepare_work(jobs[0])
@@ -709,10 +743,14 @@ def test_spi_and_note_graph_replacement_keep_custom_keyboard(monkeypatch):
     with session() as db:
         db.add(GraphSnapshot(id="b" * 64, png=PNG + b"new", render_digest="d" * 64))
         from socrat_bot.models import Incident
+
         db.get(Incident, "graph").graph_capture = "b" * 64
         message_id = db.get(TelegramCard, ("graph", 1)).message_id
     _, jobs = publish_spi(
-        "graph", "https://github.com/alchemmist/homelab/issues/9", "SPI", 1,
+        "graph",
+        "https://github.com/alchemmist/homelab/issues/9",
+        "SPI",
+        1,
         [{"chat_id": 1, "message_id": message_id}],
     )
     work = prepare_work(jobs[0])
@@ -739,6 +777,7 @@ def test_spi_text_photo_upgrade_rebuilds_escalation_policy(monkeypatch, policy):
             incident.level = 10
         elif policy in {"disabled", "insufficient"}:
             from sqlalchemy import select
+
             user = db.scalar(select(User).where(User.telegram_id == 1))
             if policy == "disabled":
                 user.alerts_enabled = False
@@ -746,7 +785,10 @@ def test_spi_text_photo_upgrade_rebuilds_escalation_policy(monkeypatch, policy):
                 user.admin_level = 30
         message_id = db.get(TelegramCard, ("graph", 1)).message_id
     _, jobs = publish_spi(
-        "graph", "https://github.com/alchemmist/homelab/issues/9", "SPI", 1,
+        "graph",
+        "https://github.com/alchemmist/homelab/issues/9",
+        "SPI",
+        1,
         [{"chat_id": 1, "message_id": message_id}],
     )
     work = prepare_work(jobs[0])

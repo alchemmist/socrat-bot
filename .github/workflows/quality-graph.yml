@@ -37,7 +37,7 @@ jobs:
           adapter: exit-code
           report-path: ''
           command-outcome: ${{ steps.quality-command.outcome }}
-          graph-digest: 9881ac122bd164e658a2d75dac492f3722c2a1043cc5c3d54b7f3be715055bb0
+          graph-digest: 4725b6eab857afbf798440abe5ac266bad9f1e01cbc0709270ac35b1c952cb08
           approval-findings: 'false'
           approval-files: 'false'
           approval-node: 'false'
@@ -63,7 +63,7 @@ jobs:
       QG_OPERATION_ID: graph-freshness
       QG_NODE_ID: graph-freshness
       QG_NODE_TITLE: Quality Graph declaration freshness
-      QG_GRAPH_DIGEST: 9881ac122bd164e658a2d75dac492f3722c2a1043cc5c3d54b7f3be715055bb0
+      QG_GRAPH_DIGEST: 4725b6eab857afbf798440abe5ac266bad9f1e01cbc0709270ac35b1c952cb08
     timeout-minutes: 5
   n8n-card-links:
     name: Safe n8n card links and existing card regressions
@@ -78,7 +78,7 @@ jobs:
       - run: uv sync --locked
       - run: 'uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py
 
-          uv run ruff check src/socrat_bot/graph_jobs.py src/socrat_bot/primary_graphs.py src/socrat_bot/primary_delivery.py tests/test_primary_graphs.py alembic/versions/0018_graph_jobs.py
+          uv run ruff check src/socrat_bot/graph_jobs.py src/socrat_bot/primary_graphs.py src/socrat_bot/primary_delivery.py tests/test_primary_graphs.py src/socrat_bot/graph_contract.py src/socrat_bot/graph_source.py tests/test_graph_source.py alembic/versions/0019_graph_source.py alembic/versions/0018_graph_jobs.py
 
           uv run pytest -q tests/test_cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py tests/test_primary_graphs.py
 
@@ -97,7 +97,7 @@ jobs:
           adapter: exit-code
           report-path: ''
           command-outcome: ${{ steps.quality-command.outcome }}
-          graph-digest: 9881ac122bd164e658a2d75dac492f3722c2a1043cc5c3d54b7f3be715055bb0
+          graph-digest: 4725b6eab857afbf798440abe5ac266bad9f1e01cbc0709270ac35b1c952cb08
           approval-findings: 'false'
           approval-files: 'false'
           approval-node: 'false'
@@ -123,7 +123,7 @@ jobs:
       QG_OPERATION_ID: n8n-card-links
       QG_NODE_ID: n8n-card-links
       QG_NODE_TITLE: Safe n8n card links and existing card regressions
-      QG_GRAPH_DIGEST: 9881ac122bd164e658a2d75dac492f3722c2a1043cc5c3d54b7f3be715055bb0
+      QG_GRAPH_DIGEST: 4725b6eab857afbf798440abe5ac266bad9f1e01cbc0709270ac35b1c952cb08
     timeout-minutes: 5
   full-regressions:
     name: Full bot regressions with isolated PostgreSQL
@@ -151,7 +151,7 @@ jobs:
           adapter: exit-code
           report-path: ''
           command-outcome: ${{ steps.quality-command.outcome }}
-          graph-digest: 9881ac122bd164e658a2d75dac492f3722c2a1043cc5c3d54b7f3be715055bb0
+          graph-digest: 4725b6eab857afbf798440abe5ac266bad9f1e01cbc0709270ac35b1c952cb08
           approval-findings: 'false'
           approval-files: 'false'
           approval-node: 'false'
@@ -180,7 +180,7 @@ jobs:
       QG_OPERATION_ID: full-regressions
       QG_NODE_ID: full-regressions
       QG_NODE_TITLE: Full bot regressions with isolated PostgreSQL
-      QG_GRAPH_DIGEST: 9881ac122bd164e658a2d75dac492f3722c2a1043cc5c3d54b7f3be715055bb0
+      QG_GRAPH_DIGEST: 4725b6eab857afbf798440abe5ac266bad9f1e01cbc0709270ac35b1c952cb08
     timeout-minutes: 15
     services:
       postgres:

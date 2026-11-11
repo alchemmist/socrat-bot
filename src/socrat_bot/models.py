@@ -97,6 +97,7 @@ class GraphSnapshot(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     png: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     render_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chart_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class GraphJob(Base):

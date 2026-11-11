@@ -41,7 +41,7 @@ operations:
     title: Safe n8n card links and existing card regressions
     run: |
       uv run ruff check --isolated --select E4,E7,E9,F src/socrat_bot/cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py
-      uv run ruff check src/socrat_bot/graph_jobs.py src/socrat_bot/primary_graphs.py src/socrat_bot/primary_delivery.py tests/test_primary_graphs.py alembic/versions/0018_graph_jobs.py
+      uv run ruff check src/socrat_bot/graph_jobs.py src/socrat_bot/primary_graphs.py src/socrat_bot/primary_delivery.py tests/test_primary_graphs.py src/socrat_bot/graph_contract.py src/socrat_bot/graph_source.py tests/test_graph_source.py alembic/versions/0019_graph_source.py alembic/versions/0018_graph_jobs.py
       uv run pytest -q tests/test_cards.py tests/test_n8n_links.py tests/test_quality_graph_contract.py tests/test_primary_graphs.py
   full-regressions:
     title: Full bot regressions with isolated PostgreSQL

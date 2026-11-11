@@ -53,7 +53,7 @@ def test_node_card_uses_dashboard_and_rancher_node():
         }
     )
     labels = [link.label for link in card.links]
-    assert labels == ["Alert", "Nodes", "Rancher"]
+    assert labels == ["Alert", "Node", "Rancher"]
     assert "var-node=socrat-1" in card.links[1].url
     assert card.links[2].url.endswith("/node/socrat-1#pods")
     assert card.matchers == [

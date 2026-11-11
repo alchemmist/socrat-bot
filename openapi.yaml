@@ -1,3 +1,4 @@
+# Native gateway photos may add a digest-verified Chart link; nodes provider label is Node.
 # Internal contract for processes that integrate with Socrat Bot.
 openapi: 3.0.3
 info:

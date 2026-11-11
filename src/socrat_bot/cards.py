@@ -280,7 +280,7 @@ class NodesLink(LinkProvider):
             f"{GRAFANA_URL}/d/socrat-nodes/nodes?from=now-3h&to=now&timezone=browser"
             f"&var-node={quote(node, safe='')}&refresh=5s"
         )
-        return Link("Nodes", query)
+        return Link("Node", query)
 
 
 class RancherLink(LinkProvider):
