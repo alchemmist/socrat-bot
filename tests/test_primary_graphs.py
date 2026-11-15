@@ -23,7 +23,7 @@ def seed():
             User(
                 telegram_id=1,
                 role="owner",
-                alerts_enabled=True,
+                interested_in_alerts=True, alerts_approved=True,
                 admin_level=10,
                 receive_level=20,
             )
@@ -144,7 +144,7 @@ def test_resolved_replaces_graph_and_removes_buttons(monkeypatch):
 def test_long_initial_text_falls_back_without_truncating(monkeypatch):
     calls = mock_transport(monkeypatch)
     with session() as db:
-        db.add(User(telegram_id=1, role="owner", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=1, role="owner", interested_in_alerts=True, alerts_approved=True, receive_level=20))
         db.add(
             GraphSnapshot(
                 id="a" * 64,
@@ -298,7 +298,7 @@ def test_transient_render_retries_then_upgrades_same_text_message(monkeypatch):
 
     calls = mock_transport(monkeypatch)
     with session() as db:
-        db.add(User(telegram_id=1, role="owner", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=1, role="owner", interested_in_alerts=True, alerts_approved=True, receive_level=20))
     identity = queue_graph(monkeypatch)
     assert deliver()[1] == "sendMessage"
     text_id = 101
@@ -361,7 +361,7 @@ def test_late_firing_graph_cannot_replace_new_resolved_intent(monkeypatch):
 
     mock_transport(monkeypatch)
     with session() as db:
-        db.add(User(telegram_id=1, role="owner", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=1, role="owner", interested_in_alerts=True, alerts_approved=True, receive_level=20))
     old = queue_graph(monkeypatch)
     deliver()
     old_work = claim()
@@ -485,7 +485,7 @@ def test_burst_of_six_resolved_cards_all_gain_graphs_in_place(monkeypatch):
 
     calls = mock_transport(monkeypatch)
     with session() as db:
-        db.add(User(telegram_id=1, role="owner", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=1, role="owner", interested_in_alerts=True, alerts_approved=True, receive_level=20))
     identities = []
     for i in range(6):
         submit_card(Card(key=f"synthetic-pod-{i}", title="KubePodNotReady"))
@@ -780,7 +780,7 @@ def test_spi_text_photo_upgrade_rebuilds_escalation_policy(monkeypatch, policy):
 
             user = db.scalar(select(User).where(User.telegram_id == 1))
             if policy == "disabled":
-                user.alerts_enabled = False
+                user.interested_in_alerts = False
             else:
                 user.admin_level = 30
         message_id = db.get(TelegramCard, ("graph", 1)).message_id

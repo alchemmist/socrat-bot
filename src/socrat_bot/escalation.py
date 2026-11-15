@@ -42,7 +42,7 @@ def button(
         incident.status != "firing"
         or incident.level == levels[0]
         or not user
-        or not user.alerts_enabled
+        or not user.alerts_active
         or user.admin_level > incident.level
     ):
         return None
@@ -170,7 +170,7 @@ def route(db: Session, key: str, firing: bool) -> list[int]:
             db.scalars(
                 select(User)
                 .where(
-                    User.alerts_enabled.is_(True), User.receive_level >= incident.level
+                    User.alerts_active.is_(True), User.receive_level >= incident.level
                 )
                 .order_by(User.telegram_id)
             )
@@ -212,7 +212,7 @@ def escalate(
     expected: int,
 ) -> str:
     user = db.scalar(select(User).where(User.telegram_id == actor))
-    if actor != chat_id or not user or not user.alerts_enabled:
+    if actor != chat_id or not user or not user.alerts_active:
         return "Not authorized"
     # The callback digest is compact enough for Telegram's 64-byte limit.
     incident = next(
@@ -235,7 +235,7 @@ def escalate(
     if expected not in levels or expected == levels[0]:
         return "Already at final level"
     destination = levels[levels.index(expected) - 1]
-    users = list(db.scalars(select(User).where(User.alerts_enabled.is_(True))))
+    users = list(db.scalars(select(User).where(User.alerts_active.is_(True))))
     if not any(u.admin_level == destination for u in users):
         return "Next tier has no enabled subscribers"
     history = incident.history + [
@@ -447,11 +447,11 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             discard()
             return None
         p["_level"], p["_status"] = incident.level, incident.status
-        if not existing and (not user or not user.alerts_enabled):
+        if not existing and (not user or not user.alerts_active):
             discard()
             return None
         if p["kind"] == "notice":
-            if not user or not user.alerts_enabled:
+            if not user or not user.alerts_active:
                 discard()
                 return None
             bot_id = os.environ.get("TELEGRAM_BOT_TOKEN", "").split(":", 1)[0]
@@ -620,7 +620,7 @@ def authorize_http(work: Work) -> bool:
             return False
         if _method in ("sendMessage", "sendPhoto"):
             user = db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
-            if not user or not user.alerts_enabled:
+            if not user or not user.alerts_active:
                 # An unsubscribe may arrive after this work was prepared.
                 db.get(AlertOutbox, id_).done = True
                 state.lease_owner = state.lease_until = None

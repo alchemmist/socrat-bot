@@ -67,7 +67,7 @@ def test_delayed_firing_after_resolved_never_replaces_episode_copy():
     init_schema()
     with session()as db:
         db.execute(delete(TelegramCard))
-        db.add(User(telegram_id=1,role="user",alerts_enabled=True,admin_level=20,receive_level=20))
+        db.add(User(telegram_id=1,role="user",interested_in_alerts=True, alerts_approved=True,admin_level=20,receive_level=20))
     calls=[]
     class Response:
         def json(self):return {'ok':True,'result':{'message_id':10}}

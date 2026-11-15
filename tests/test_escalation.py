@@ -70,7 +70,7 @@ def seed():
                 User(
                     telegram_id=id_,
                     role="owner" if id_ == 1 else "user",
-                    alerts_enabled=True,
+                    interested_in_alerts=True, alerts_approved=True,
                     admin_level=admin,
                     receive_level=receive,
                 )
@@ -126,7 +126,7 @@ def test_levels_defaults(store, monkeypatch):
         owner = ensure_user(db, 1)
         user = ensure_user(db, 9)
         assert (owner.admin_level, owner.receive_level) == (10, 20)
-        assert (user.admin_level, user.receive_level, user.alerts_enabled) == (
+        assert (user.admin_level, user.receive_level, user.alerts_active) == (
             20,
             20,
             False,
@@ -143,7 +143,7 @@ def test_routing_receive_change_no_replay_and_disabled_edits(store):
     seed()
     with database.session() as db:
         db.scalar(select(User).where(User.telegram_id == 3)).receive_level = 20
-        db.scalar(select(User).where(User.telegram_id == 2)).alerts_enabled = False
+        db.scalar(select(User).where(User.telegram_id == 2)).interested_in_alerts = False
         assert set(route(db, "disk", True)) == {1, 2, 4}
         assert set(route(db, "disk", False)) == {1, 2, 4}
         assert set(route(db, "disk", True)) == {1, 3, 4}
@@ -205,7 +205,7 @@ def test_rejections(store, mutation):
     args = {}
     with database.session() as db:
         if mutation == "disabled":
-            db.scalar(select(User).where(User.telegram_id == 2)).alerts_enabled = False
+            db.scalar(select(User).where(User.telegram_id == 2)).interested_in_alerts = False
         elif mutation == "foreign_chat":
             args["chat"] = 1
         elif mutation == "foreign_message":
@@ -218,7 +218,7 @@ def test_rejections(store, mutation):
             args["generation"] = 2
         elif mutation == "empty":
             for user in db.scalars(select(User).where(User.admin_level == 10)):
-                user.alerts_enabled = False
+                user.interested_in_alerts = False
     assert transition(**args) != "Escalated"
     with database.session() as db:
         assert db.get(Incident, "disk").level == 20
@@ -233,7 +233,7 @@ def test_multiple_tiers_no_skip_actor_exclusion(store, monkeypatch):
             User(
                 telegram_id=5,
                 role="user",
-                alerts_enabled=True,
+                interested_in_alerts=True, alerts_approved=True,
                 admin_level=5,
                 receive_level=5,
             )
@@ -335,7 +335,7 @@ def test_outbox_disables_new_deliveries_and_invalidates_generation(store, monkey
     seed()
     transition()
     with database.session() as db:
-        db.scalar(select(User).where(User.telegram_id == 3)).alerts_enabled = False
+        db.scalar(select(User).where(User.telegram_id == 3)).interested_in_alerts = False
     calls = mock_telegram(monkeypatch)
     for _ in range(12):
         asyncio.run(drain_one())
@@ -383,7 +383,7 @@ def test_api_card_keyboard_generation_and_no_replay(store, monkeypatch):
                 User(
                     telegram_id=id_,
                     role="owner" if id_ == 1 else "user",
-                    alerts_enabled=True,
+                    interested_in_alerts=True, alerts_approved=True,
                     admin_level=admin,
                     receive_level=receive,
                 )
@@ -409,7 +409,7 @@ def test_api_card_keyboard_generation_and_no_replay(store, monkeypatch):
         assert "Level 20" in body["text"]
     with database.session() as db:
         db.scalar(select(User).where(User.telegram_id == 3)).receive_level = 20
-        db.scalar(select(User).where(User.telegram_id == 2)).alerts_enabled = False
+        db.scalar(select(User).where(User.telegram_id == 2)).interested_in_alerts = False
     calls.clear()
     assert {c["chat_id"] for c in post()["copies"]} == {1, 2}
     assert all(method == "editMessageText" for method, body in calls)
@@ -473,7 +473,7 @@ def test_commands_private_settings_owner_assignment(store):
     asyncio.run(on_alerts(update(3, chat=-9), SimpleNamespace(args=["off"])))
     assert "private chat" in message.reply_text.call_args.args[0]
     with database.session() as db:
-        assert db.scalar(select(User).where(User.telegram_id == 3)).alerts_enabled
+        assert db.scalar(select(User).where(User.telegram_id == 3)).alerts_active
     asyncio.run(on_alerts(update(2), SimpleNamespace(args=["level", "10"])))
     assert "Invalid" in message.reply_text.call_args.args[0]
 
@@ -594,7 +594,7 @@ def initial_users():
                 User(
                     telegram_id=id_,
                     role="owner" if id_ == 1 else "user",
-                    alerts_enabled=True,
+                    interested_in_alerts=True, alerts_approved=True,
                     admin_level=10 if id_ != 2 else 20,
                     receive_level=receive,
                 )
@@ -668,7 +668,7 @@ def test_initial_failure_retry_keeps_original_audience(store, monkeypatch, parti
             User(
                 telegram_id=4,
                 role="user",
-                alerts_enabled=True,
+                interested_in_alerts=True, alerts_approved=True,
                 admin_level=20,
                 receive_level=20,
             )
@@ -1006,7 +1006,7 @@ init_schema()
     with database._engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0019_graph_source"
+            == "0020_user_interests"
         )
     command = [sys.executable, "-m", "alembic"]
     subprocess.run(
@@ -1113,7 +1113,7 @@ def test_big_telegram_id_durable_claim(store, monkeypatch):
             User(
                 telegram_id=8_000_000_001,
                 role="user",
-                alerts_enabled=True,
+                interested_in_alerts=True, alerts_approved=True,
                 admin_level=20,
                 receive_level=20,
             )
@@ -1622,7 +1622,7 @@ def test_unsubscribe_preserves_approval_and_resubscribe_needs_no_owner(store, mo
     with database.session() as db:
         ensure_user(db, 1)
         person = ensure_user(db, 2)
-        person.uses_vpn = True
+        person.interested_in_vpn = True
     bot = SimpleNamespace(send_message=AsyncMock())
 
     def query(actor=2, data="al:yes", chat=2):
@@ -1640,7 +1640,7 @@ def test_unsubscribe_preserves_approval_and_resubscribe_needs_no_owner(store, mo
     assert bot.send_message.call_args.args[0] == 1  # first request reaches owner
     with database.session() as db:
         person = db.scalar(select(User).where(User.telegram_id == 2))
-        assert not person.alerts_enabled and not person.alerts_approved
+        assert not person.alerts_active and not person.alerts_approved
     asyncio.run(app._approve_alerts(query(actor=1, data="al:ok:2", chat=1)))
     bot.send_message.reset_mock()
     for method in ("command", "button", "alerts off"):
@@ -1655,21 +1655,21 @@ def test_unsubscribe_preserves_approval_and_resubscribe_needs_no_owner(store, mo
             asyncio.run(app.on_alerts(update, SimpleNamespace(args=["off"])))
         with database.session() as db:
             person = db.scalar(select(User).where(User.telegram_id == 2))
-            assert not person.alerts_enabled
-            assert person.alerts_approved and person.uses_vpn
+            assert not person.alerts_active
+            assert person.alerts_approved and person.interested_in_vpn
             assert person.admin_level == person.receive_level == 20
             assert 2 not in route(db, "new-after-unsubscribe-" + method, True)
         # Merely opening /start (ensure_user) must not resubscribe.
         with database.session() as db:
-            assert not ensure_user(db, 2).alerts_enabled
+            assert not ensure_user(db, 2).alerts_active
         asyncio.run(app._request_alerts(query()))
         assert bot.send_message.await_count == 0
         with database.session() as db:
             person = db.scalar(select(User).where(User.telegram_id == 2))
-            assert person.alerts_enabled and person.alerts_approved
+            assert person.alerts_active and person.alerts_approved
             assert list(db.scalars(select(TelegramCard))) == []  # no backlog replay
-    assert app._start_keyboard(True, True).inline_keyboard[0][0].callback_data == "al:no"
-    assert app._start_keyboard(True, False).inline_keyboard[0][0].callback_data == "al:yes"
+    assert app._start_keyboard({"vpn", "alerts"}, True).inline_keyboard[1][0].callback_data == "interest:alerts:off"
+    assert app._start_keyboard({"vpn"}, True).inline_keyboard[1][0].callback_data == "interest:alerts:on"
 
 
 def test_unsubscribe_private_and_unapproved_cannot_enable(store):
@@ -1686,19 +1686,19 @@ def test_unsubscribe_private_and_unapproved_cannot_enable(store):
     asyncio.run(app.on_alerts(update, SimpleNamespace(args=["on"])))
     assert "Approval required" in reply.call_args.args[0]
     with database.session() as db:
-        assert not ensure_user(db, 2).alerts_enabled
+        assert not ensure_user(db, 2).alerts_active
         owner = ensure_user(db, 1)
-        owner.alerts_enabled = True
+        owner.interested_in_alerts = True
     update.effective_user.id = 1
     update.effective_chat.id = -123
     asyncio.run(app.on_unsubscribe(update, SimpleNamespace()))
     with database.session() as db:
-        assert ensure_user(db, 1).alerts_enabled
+        assert ensure_user(db, 1).alerts_active
     update.effective_chat.id = 1
     asyncio.run(app.on_unsubscribe(update, SimpleNamespace()))
     with database.session() as db:
         owner = ensure_user(db, 1)
-        assert owner.alerts_approved and not owner.alerts_enabled
+        assert owner.alerts_approved and not owner.alerts_active
 
 
 def test_old_approval_button_cannot_undo_unsubscribe(store):
@@ -1711,13 +1711,13 @@ def test_old_approval_button_cannot_undo_unsubscribe(store):
     with database.session() as db:
         ensure_user(db, 1)
         person = approve_alerts(db, 2)
-        person.alerts_enabled = False
+        person.interested_in_alerts = False
     bot = SimpleNamespace(send_message=AsyncMock())
     query = SimpleNamespace(data="al:ok:2", from_user=SimpleNamespace(id=1), answer=AsyncMock(), edit_message_text=AsyncMock(), get_bot=lambda: bot)
     asyncio.run(app._approve_alerts(query))
     with database.session() as db:
         person = ensure_user(db, 2)
-        assert person.alerts_approved and not person.alerts_enabled
+        assert person.alerts_approved and not person.alerts_active
     assert bot.send_message.await_count == 0
 
 
@@ -1729,12 +1729,12 @@ def test_unsubscribe_fences_prepared_new_delivery(store, monkeypatch):
     with database.session() as db:
         ensure_user(db, 1)
         person = ensure_user(db, 2)
-        person.alerts_enabled = True
+        person.interested_in_alerts = True
         person.alerts_approved = True
     _recipients, jobs = submit_card(Card(key="prepared-unsubscribe", title="Test", where="", summary="", status="firing"))
     work = next(w for id_ in jobs if (w := prepare_work(id_)) and w[2]["chat_id"] == 2)
     with database.session() as db:
-        db.scalar(select(User).where(User.telegram_id == 2)).alerts_enabled = False
+        db.scalar(select(User).where(User.telegram_id == 2)).interested_in_alerts = False
     calls = response_client(monkeypatch)
     assert not asyncio.run(_deliver_work(work))
     assert calls == []

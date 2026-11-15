@@ -115,7 +115,7 @@ def _claim(key=None, generation=None):
             ):
                 continue
             person = db.scalar(select(User).where(User.telegram_id == state.chat_id))
-            if not person or not person.alerts_enabled:
+            if not person or not person.alerts_active:
                 continue
             identity = (image.key, image.generation, state.chat_id, image.slot)
             insert_once(
@@ -173,7 +173,7 @@ def _claim(key=None, generation=None):
             ).first()
             if fresh:
                 image, receipt, card, state, person = fresh
-            if (not fresh or not person.alerts_enabled
+            if (not fresh or not person.alerts_active
                 or state.generation != identity[1]
                 or state.message_generation != identity[1]
                 or card.generation != identity[1] or not card.message_id
@@ -207,7 +207,7 @@ def _eligible(work):
             state
             and incident
             and user
-            and user.alerts_enabled
+            and user.alerts_active
             and incident.generation == generation == state.generation
             and state.lease_owner == work["owner"]
             and state.lease_until.replace(tzinfo=utcnow().tzinfo) > utcnow()

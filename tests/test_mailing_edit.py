@@ -147,8 +147,8 @@ def application(store, monkeypatch):
 
     monkeypatch.setattr(app, 'is_owner', lambda db, identity: identity == 1)
     with database.session() as db:
-        db.add(User(telegram_id=10, role='user', uses_vpn=True))
-        db.add(User(telegram_id=11, role='user', uses_vpn=True))
+        db.add(User(telegram_id=10, role='user', interested_in_vpn=True))
+        db.add(User(telegram_id=11, role='user', interested_in_vpn=True))
     state = SimpleNamespace(depth=0, calls=[])
 
     @contextmanager

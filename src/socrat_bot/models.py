@@ -14,7 +14,8 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.types import JSON
 
 
@@ -36,12 +37,65 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(32), nullable=True)
     role: Mapped[str] = mapped_column(String(32))
     panel_client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    uses_vpn: Mapped[bool] = mapped_column(default=False)
-    alerts_enabled: Mapped[bool] = mapped_column(default=False)
+    interests: Mapped[list["UserInterest"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin", passive_deletes=True,
+    )
+
+    def interested_in(self, topic: str) -> bool:
+        return any(row.topic == topic and row.enabled for row in self.interests)
+
+    def set_interest(self, topic: str, enabled: bool) -> None:
+        for row in self.interests:
+            if row.topic == topic:
+                row.enabled = enabled
+                return
+        self.interests.append(UserInterest(topic=topic, enabled=enabled))
+
+    @hybrid_property
+    def interested_in_vpn(self):
+        return self.interested_in("vpn")
+
+    @interested_in_vpn.setter
+    def interested_in_vpn(self, enabled):
+        self.set_interest("vpn", enabled)
+
+    @interested_in_vpn.expression
+    def interested_in_vpn(cls):
+        return cls.interests.any((UserInterest.topic == "vpn") & UserInterest.enabled)
+
+    @hybrid_property
+    def interested_in_alerts(self):
+        return self.interested_in("alerts")
+
+    @interested_in_alerts.setter
+    def interested_in_alerts(self, enabled):
+        self.set_interest("alerts", enabled)
+
+    @interested_in_alerts.expression
+    def interested_in_alerts(cls):
+        return cls.interests.any((UserInterest.topic == "alerts") & UserInterest.enabled)
+
+    @hybrid_property
+    def alerts_active(self):
+        return self.interested_in_alerts and bool(self.alerts_approved)
+
+    @alerts_active.expression
+    def alerts_active(cls):
+        return cls.interested_in_alerts & cls.alerts_approved
+
     alerts_approved: Mapped[bool] = mapped_column(default=False)
     admin_level: Mapped[int] = mapped_column(Integer, default=20)
     receive_level: Mapped[int] = mapped_column(Integer, default=20)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserInterest(Base):
+    """Extensible opt-in flags; authority/approval never lives in this table."""
+
+    __tablename__ = "user_interests"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    topic: Mapped[str] = mapped_column(String(64), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(default=False)
 
 
 class LinkCode(Base):

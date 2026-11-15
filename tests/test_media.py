@@ -34,7 +34,7 @@ def image(raw=PNG):
 
 def prepare(raw=PNG):
     with session() as db:
-        db.add(User(telegram_id=1, role="user", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=1, role="user", interested_in_alerts=True, alerts_approved=True, receive_level=20))
     submit_card(
         Card(key="disk", title="Disk", status="firing"),
         images=[media.ImageIn(**image(raw))],
@@ -104,11 +104,11 @@ def test_failure_restart_omission_and_unsubscribe(monkeypatch):
     with session() as db:
         assert db.scalar(select(AlertImage)).data == PNG
         db.scalar(select(ImageDelivery)).available_at = utcnow() - timedelta(seconds=1)
-        db.scalar(select(User)).alerts_enabled = False
+        db.scalar(select(User)).interested_in_alerts = False
     asyncio.run(media.drain())
     assert len(calls) == 1
     with session() as db:
-        db.scalar(select(User)).alerts_enabled = True
+        db.scalar(select(User)).interested_in_alerts = True
     asyncio.run(media.drain())
     assert len(calls) == 2
 
@@ -226,8 +226,8 @@ def test_escalation_retained_images_only_new_intents(monkeypatch):
     with session() as db:
         owner = db.scalar(select(User))
         owner.admin_level = 10
-        db.add(User(telegram_id=2, role="user", alerts_enabled=True, receive_level=10))
-        db.add(User(telegram_id=3, role="user", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=2, role="user", interested_in_alerts=True, alerts_approved=True, receive_level=10))
+        db.add(User(telegram_id=3, role="user", interested_in_alerts=True, alerts_approved=True, receive_level=20))
     calls = transport(monkeypatch)
     asyncio.run(media.drain())
     with session() as db:
@@ -252,7 +252,7 @@ def test_escalation_retained_images_only_new_intents(monkeypatch):
     asyncio.run(media.drain())
     assert len(calls) == len(admitted)
     with session() as db:
-        db.add(User(telegram_id=4, role="user", alerts_enabled=True, receive_level=20))
+        db.add(User(telegram_id=4, role="user", interested_in_alerts=True, alerts_approved=True, receive_level=20))
     asyncio.run(media.drain())
     assert len(calls) == len(admitted)
 
@@ -303,7 +303,7 @@ def test_parallel_claim_single_owner(request):
     assert sum(r is not None for r in results) == 1
     work = next(r for r in results if r)
     with session() as db:
-        db.scalar(select(User)).alerts_enabled = False
+        db.scalar(select(User)).interested_in_alerts = False
     assert not media._eligible(work)
 
 

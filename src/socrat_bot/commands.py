@@ -26,10 +26,10 @@ class Command:
 
 
 COMMANDS = (
-    Command("start", "Open the bot and subscription controls", "on_start"),
+    Command("start", "Choose the bot features you are interested in", "on_start"),
     Command("alerts", "View alert settings and choose a receive level", "on_alerts"),
     Command("unsubscribe", "Stop alert notifications; keep your approval", "on_unsubscribe"),
-    Command("clients", "List opted-in VPN clients", "on_clients", owner_only=True),
+    Command("clients", "List users interested in VPN", "on_clients", owner_only=True),
     Command("alertlevel", "Assign an admin level: /alertlevel TELEGRAM_ID LEVEL", "on_alertlevel", owner_only=True),
     Command("mailing", "Send or schedule a VPN mailing: /mailing TEXT", "on_mailing", owner_only=True),
     Command("mailing_edit", "Edit a sent mailing: /mailing_edit UUID TEXT", "on_mailing_edit", owner_only=True),

@@ -40,7 +40,7 @@ def broadcast_zone() -> ZoneInfo:
 
 
 def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> User:
-    user = db.scalar(select(User).where(User.telegram_id == telegram_id))
+    user = db.scalar(select(User).where(User.telegram_id == telegram_id).with_for_update().execution_options(populate_existing=True))
     configured = owner_ids()
     has_owner = db.scalar(select(User.id).where(User.role == "owner")) is not None
     promote = telegram_id in configured or (not configured and not has_owner)
@@ -48,8 +48,8 @@ def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> U
         user = User(
             telegram_id=telegram_id,
             role="owner" if promote else "user",
-            uses_vpn=False,
-            alerts_enabled=promote,
+            interested_in_vpn=False,
+            interested_in_alerts=promote,
             alerts_approved=promote,
             admin_level=alert_levels()[0] if promote else alert_levels()[-1],
             receive_level=alert_levels()[-1],
@@ -57,11 +57,11 @@ def ensure_user(db: Session, telegram_id: int, username: str | None = None) -> U
         db.add(user)
     elif promote and user.role != "owner":
         user.role = "owner"
-        user.alerts_enabled = True
+        user.interested_in_alerts = True
         user.alerts_approved = True
         user.admin_level = alert_levels()[0]
         user.receive_level = max(user.receive_level, user.admin_level)
-    if user.alerts_enabled or user.role == "owner":
+    if user.role == "owner":
         user.alerts_approved = True
     if username is not None:
         user.username = username.lstrip("@") or None
@@ -80,9 +80,7 @@ def is_owner(db: Session, telegram_id: int) -> bool:
 
 def mark_vpn(db: Session, telegram_id: int, username: str | None = None) -> User:
     user = ensure_user(db, telegram_id, username)
-    user.uses_vpn = True
-    if user.role == "user":
-        user.role = "vpn"
+    user.interested_in_vpn = True
     audit(db, str(telegram_id), "vpn.opt_in", {"role": user.role})
     return user
 
@@ -222,8 +220,6 @@ def consume_link(db: Session, telegram_id: int, code: str) -> str:
     user = db.scalar(select(User).where(User.telegram_id == telegram_id))
     if user is None:
         user = ensure_user(db, telegram_id)
-    if user.role != "owner":
-        user.role = "vpn"
     user.panel_client_id = row.panel_client_id
     row.used_by = telegram_id
     audit(db, str(telegram_id), "vpn.link", {"panel_client_id": row.panel_client_id})
@@ -231,7 +227,7 @@ def consume_link(db: Session, telegram_id: int, code: str) -> str:
 
 
 def vpn_audience(db: Session) -> list[User]:
-    return list(db.scalars(select(User).where(User.uses_vpn.is_(True))))
+    return list(db.scalars(select(User).where(User.interested_in_vpn.is_(True))))
 
 
 def card_messages(db: Session, key: str) -> list[tuple[int, int]]:
@@ -304,7 +300,7 @@ def list_cards(db: Session, status: str = "firing") -> list[dict]:
 
 
 def alert_recipients(db: Session) -> list[User]:
-    return list(db.scalars(select(User).where(User.alerts_enabled.is_(True)).order_by(User.telegram_id)))
+    return list(db.scalars(select(User).where(User.alerts_active.is_(True)).order_by(User.telegram_id)))
 
 
 def owners(db: Session) -> list[User]:
@@ -314,7 +310,8 @@ def owners(db: Session) -> list[User]:
 def approve_alerts(db: Session, telegram_id: int, username: str | None = None) -> User:
     user = ensure_user(db, telegram_id, username)
     if not user.alerts_approved:
-        user.alerts_enabled = True
+        # Permission is independent: approval never invents an interest or
+        # reverses an opt-out while the request was awaiting approval.
         user.alerts_approved = True
         audit(db, str(telegram_id), "alerts.approve", {"role": user.role})
     return user
@@ -323,8 +320,8 @@ def approve_alerts(db: Session, telegram_id: int, username: str | None = None) -
 def format_vpn_clients(users: list[User]) -> str:
     ordered = sorted(users, key=lambda user: user.telegram_id)
     if not ordered:
-        return "VPN clients: 0"
-    lines = [f"VPN clients: {len(ordered)}"]
+        return "Interested in VPN: 0"
+    lines = [f"Interested in VPN: {len(ordered)}"]
     lines.extend(
         f"\u2022 @{user.username}" if user.username else f"\u2022 {user.telegram_id}" for user in ordered
     )

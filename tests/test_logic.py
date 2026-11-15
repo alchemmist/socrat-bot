@@ -110,25 +110,25 @@ def test_link_code_is_single_use():
 
 def test_vpn_audience_is_the_opt_in_list():
     with session() as db:
-        db.add(User(telegram_id=1, role="vpn", panel_client_id="panel-a", uses_vpn=True, alerts_enabled=False))
-        db.add(User(telegram_id=2, role="vpn", panel_client_id=None, uses_vpn=False, alerts_enabled=False))
-        db.add(User(telegram_id=3, role="owner", panel_client_id="panel-b", uses_vpn=True, alerts_enabled=True))
+        db.add(User(telegram_id=1, role="vpn", panel_client_id="panel-a", interested_in_vpn=True, interested_in_alerts=False))
+        db.add(User(telegram_id=2, role="vpn", panel_client_id=None, interested_in_vpn=False, interested_in_alerts=False))
+        db.add(User(telegram_id=3, role="owner", panel_client_id="panel-b", interested_in_vpn=True, interested_in_alerts=True, alerts_approved=True))
         db.flush()
         people = vpn_audience(db)
         audience = {user.telegram_id for user in people}
         listing = format_vpn_clients(people)
     assert audience == {1, 3}
-    assert listing == "VPN clients: 2\n\u2022 1\n\u2022 3"
+    assert listing == "Interested in VPN: 2\n\u2022 1\n\u2022 3"
 
 
 def test_vpn_client_list_prefers_username():
     shown = format_vpn_clients(
         [
-            User(telegram_id=3, role="vpn", uses_vpn=True, alerts_enabled=False, username="ada"),
-            User(telegram_id=1, role="vpn", uses_vpn=True, alerts_enabled=False),
+            User(telegram_id=3, role="vpn", interested_in_vpn=True, interested_in_alerts=False, username="ada"),
+            User(telegram_id=1, role="vpn", interested_in_vpn=True, interested_in_alerts=False),
         ]
     )
-    assert shown == "VPN clients: 2\n\u2022 1\n\u2022 @ada"
+    assert shown == "Interested in VPN: 2\n\u2022 1\n\u2022 @ada"
 
 
 def test_open_card_keeps_the_message_until_telegram_accepts():
@@ -152,9 +152,10 @@ def test_approve_alerts_keeps_the_role():
     with session() as db:
         ensure_user(db, 891074228)
         guest = ensure_user(db, 42)
+        guest.interested_in_alerts = True
         approved = approve_alerts(db, 42, "ada")
         assert guest.role == "user"
-        assert approved.alerts_enabled is True
+        assert approved.alerts_active is True
         assert approved.username == "ada"
 
 
@@ -163,8 +164,8 @@ def test_mark_vpn_does_not_demote_the_owner():
         ensure_user(db, 891074228)
         owner = mark_vpn(db, 891074228)
         guest = mark_vpn(db, 42)
-        assert owner.role == "owner" and owner.uses_vpn is True
-        assert guest.role == "vpn" and guest.uses_vpn is True
+        assert owner.role == "owner" and owner.interested_in_vpn is True
+        assert guest.role == "user" and guest.interested_in_vpn is True
 
 
 def test_mailing_hours_skip_the_past_on_the_same_day():

@@ -12,6 +12,8 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
+
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from socrat_bot import media
@@ -204,22 +206,25 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
         return
+    if update.effective_chat.id != user.id:
+        await update.message.reply_text("Open /start in private chat to choose your interests.")
+        return
     arg = context.args[0] if context.args else ""
     with session() as db:
         person = ensure_user(db, user.id, user.username)
-        uses_vpn = bool(person.uses_vpn)
-        alerts = bool(person.alerts_enabled)
+        interests = {row.topic for row in person.interests if row.enabled}
+        approved = bool(person.alerts_approved)
         owner = person.role == "owner"
         log.info("telegram start")
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
         else:
-            text = _start_text(uses_vpn, alerts)
+            text = _start_text(interests, approved)
     if arg.startswith("link_"):
         await update.message.reply_text(text)
         return
-    keyboard = _start_keyboard(uses_vpn, alerts)
+    keyboard = _start_keyboard(interests, approved)
     await update.message.reply_text(text, reply_markup=keyboard)
     if owner and not await sync_owner_menu(context.bot, user.id):
         log.info("telegram commands failed")
@@ -283,26 +288,30 @@ async def _remember_usernames(telegram_ids: list[int]) -> None:
                 person.username = username
 
 
-def _start_text(uses_vpn: bool, alerts: bool) -> str:
-    lines = ["Socrat is online."]
-    if uses_vpn:
-        lines.append("You are on the VPN list.")
-    if alerts:
-        lines.append("You are subscribed to alerts.")
+def _start_text(interests: set[str], approved: bool) -> str:
+    from .interests import INTERESTS
+
+    lines = ["Welcome to Socrat Bot!", "", "I'm interested in…", "Choose any number of interests. Tap again to turn one off.", ""]
+    for item in INTERESTS:
+        state = "on" if item.key in interests else "off"
+        if item.approval_required and item.key in interests and not approved:
+            state = "awaiting owner approval"
+        lines.append(f"{item.label}: {state}")
+    lines.extend(["", "VPN enables VPN mailings; it does not create or remove VPN access.", "Alerts require owner approval. Turning them off keeps that approval."])
     return "\n".join(lines)
 
 
-def _start_keyboard(uses_vpn: bool, alerts: bool) -> InlineKeyboardMarkup | None:
-    buttons = []
-    if not uses_vpn:
-        buttons.append(InlineKeyboardButton("I use VPN", callback_data="vpn:yes"))
-    if not alerts:
-        buttons.append(InlineKeyboardButton("Subscribe to alerts", callback_data="al:yes"))
-    else:
-        buttons.append(InlineKeyboardButton("Unsubscribe", callback_data="al:no"))
-    if not buttons:
-        return None
-    return InlineKeyboardMarkup([buttons])
+def _start_keyboard(interests: set[str], approved: bool) -> InlineKeyboardMarkup:
+    from .interests import INTERESTS
+
+    rows = []
+    for item in INTERESTS:
+        enabled = item.key in interests
+        marker = "☑" if enabled else "☐"
+        suffix = " · pending approval" if item.approval_required and enabled and not approved else ""
+        # Explicit target state makes repeated delivery of the same callback safe.
+        rows.append([InlineKeyboardButton(f"{marker} {item.label}{suffix}", callback_data=f"interest:{item.key}:{'off' if enabled else 'on'}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _person_label(user) -> str:
@@ -490,6 +499,14 @@ async def _on_mailing_callback(query, data: str) -> bool:
     return True
 
 
+async def _edit_interests(query, text, markup):
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
 async def _request_alerts(query) -> None:
     try:
         await query.answer()
@@ -503,17 +520,24 @@ async def _request_alerts(query) -> None:
         return
     with session() as db:
         person = ensure_user(db, user.id, user.username)
+        already_selected = person.interested_in_alerts
+        person.interested_in_alerts = True
         approved = person.alerts_approved
+        text = _start_text({row.topic for row in person.interests if row.enabled}, bool(approved))
+        markup = _start_keyboard({row.topic for row in person.interests if row.enabled}, bool(approved))
         if approved:
-            person.alerts_enabled = True
-            text = _start_text(bool(person.uses_vpn), True)
-            markup = _start_keyboard(bool(person.uses_vpn), True)
-        targets = [(owner.telegram_id, owner.username) for owner in owners(db)] if not approved else []
+            person.interested_in_alerts = True
+            text = _start_text({row.topic for row in person.interests if row.enabled}, True)
+            markup = _start_keyboard({row.topic for row in person.interests if row.enabled}, True)
+        targets = [(owner.telegram_id, owner.username) for owner in owners(db)] if not approved and not already_selected else []
     if approved:
-        await query.edit_message_text(text, reply_markup=markup)
+        await _edit_interests(query, text, markup)
+        return
+    await _edit_interests(query, text, markup)
+    if already_selected:
         return
     if not targets:
-        await query.message.reply_text("No owner is available to approve this.")
+        await query.message.reply_text("Interest saved. No owner is available to approve alerts yet.")
         return
     label = _person_label(user)
     for telegram_id, _username in targets:
@@ -544,13 +568,14 @@ async def _approve_alerts(query) -> None:
         already_approved = bool(existing and existing.alerts_approved)
         person = approve_alerts(db, telegram_id)
         label = f"@{person.username}" if person.username else str(person.telegram_id)
+        active = person.alerts_active
     if already_approved:
         await query.edit_message_text(f"Already approved {label}.")
         return
     await query.edit_message_text(f"Approved {label}.")
     schedule_action_event({"event": "alerts.approved", "telegram_id": person.telegram_id, "username": person.username})
     try:
-        await query.get_bot().send_message(telegram_id, "You are subscribed to alerts.")
+        await query.get_bot().send_message(telegram_id, "Your Alerts interest is approved." + (" Alert notifications are on." if active else " Alerts remain off; enable them in /start when you want."))
     except Exception:
         pass
 
@@ -561,6 +586,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     from .mailing_list import on_list_callback
     if await on_list_callback(query):
+        return
+    if query.data.startswith("interest:"):
+        from .interests import BY_KEY
+        parts = query.data.split(":")
+        if len(parts) != 3 or parts[1] not in BY_KEY or parts[2] not in {"on", "off"}:
+            await query.answer("Invalid interest")
+            return
+        if query.message is None or query.message.chat_id != query.from_user.id:
+            await query.answer("Choose your interests in private chat only.")
+            return
+        topic, enabled = parts[1], parts[2] == "on"
+        if topic == "alerts" and enabled:
+            await _request_alerts(query)
+            return
+        with session() as db:
+            person = ensure_user(db, query.from_user.id, query.from_user.username)
+            changed = person.interested_in(topic) != enabled
+            person.set_interest(topic, enabled)
+            from .logic import audit
+            if changed:
+                audit(db, str(query.from_user.id), "interest.changed", {"topic": topic, "enabled": enabled})
+            text = _start_text({row.topic for row in person.interests if row.enabled}, person.alerts_approved)
+            markup = _start_keyboard({row.topic for row in person.interests if row.enabled}, person.alerts_approved)
+        await query.answer()
+        try:
+            await query.edit_message_text(text, reply_markup=markup)
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+        if topic == "vpn" and enabled and changed:
+            schedule_action_event({"event": "vpn.opt_in", "telegram_id": query.from_user.id, "username": query.from_user.username})
         return
     if query.data.startswith("esc:"):
         try:
@@ -578,7 +634,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 level = int(query.data.split(":")[1])
             except ValueError:
                 level = -1
-            allowed = query.message.chat_id == query.from_user.id and person.alerts_enabled and level in alert_levels() and level >= person.admin_level
+            allowed = query.message.chat_id == query.from_user.id and person.alerts_active and level in alert_levels() and level >= person.admin_level
             if allowed:
                 person.receive_level = level
                 settings_text = f"Alerts: enabled\nAdmin level: {person.admin_level}\nReceive level: {person.receive_level}"
@@ -595,8 +651,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         with session() as db:
             person = ensure_user(db, query.from_user.id, query.from_user.username)
-            person.alerts_enabled = False
-            markup = _start_keyboard(bool(person.uses_vpn), False)
+            person.interested_in_alerts = False
+            markup = _start_keyboard({row.topic for row in person.interests if row.enabled}, person.alerts_approved)
         await query.edit_message_text("You are unsubscribed from alerts. You can subscribe again at any time.", reply_markup=markup)
         return
     if query.data == "al:yes":
@@ -606,14 +662,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _approve_alerts(query)
         return
     if query.data == "vpn:yes":
+        if query.message is None or query.message.chat_id != query.from_user.id:
+            await query.answer("Choose your interests in private chat only.")
+            return
         try:
             await query.answer()
         except Exception:
             pass
         with session() as db:
             person = mark_vpn(db, query.from_user.id, query.from_user.username)
-            text = _start_text(True, bool(person.alerts_enabled))
-            keyboard = _start_keyboard(True, bool(person.alerts_enabled))
+            text = _start_text({row.topic for row in person.interests if row.enabled}, person.alerts_approved)
+            keyboard = _start_keyboard({row.topic for row in person.interests if row.enabled}, person.alerts_approved)
             schedule_action_event({"event": "vpn.opt_in", "telegram_id": person.telegram_id, "username": person.username})
         try:
             await query.edit_message_text(text, reply_markup=keyboard)
@@ -662,7 +721,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if action is None:
             return
         person = ensure_user(db, query.from_user.id, query.from_user.username)
-        allowed = person.role == "owner" or (action.type == "alert.silence" and person.alerts_enabled)
+        allowed = person.role == "owner" or (action.type == "alert.silence" and person.alerts_active)
         if not allowed:
             await query.edit_message_text("This action is available to the owner only.")
             return
@@ -1130,24 +1189,24 @@ async def on_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         result = ""
         if args and args[0] in {"off", "disable"}:
-            person.alerts_enabled = False
+            person.interested_in_alerts = False
         elif args and args[0] in {"on", "enable"}:
             if person.alerts_approved:
-                person.alerts_enabled = True
-            elif not person.alerts_enabled:
-                result = "Approval required. Use Subscribe to alerts in /start.\n"
+                person.interested_in_alerts = True
+            elif not person.alerts_active:
+                result = "Approval required. Choose Alerts in /start.\n"
         elif len(args) == 2 and args[0] == "level":
             try:
                 level = int(args[1])
             except ValueError:
                 level = -1
-            if person.alerts_enabled and level in alert_levels() and level >= person.admin_level:
+            if person.alerts_active and level in alert_levels() and level >= person.admin_level:
                 person.receive_level = level
             else:
                 result = "Invalid or unauthorized receive level.\n"
-        text = result + f"Alerts: {'enabled' if person.alerts_enabled else 'disabled'}\nAdmin level: {person.admin_level}\nReceive level: {person.receive_level}"
-        rows = [[InlineKeyboardButton(f"Receive {n}", callback_data=f"rl:{n}") for n in alert_levels() if n >= person.admin_level]] if person.alerts_enabled else [[InlineKeyboardButton("Subscribe to alerts", callback_data="al:yes")]]
-    if person.alerts_enabled:
+        text = result + f"Alerts: {'enabled' if person.alerts_active else 'disabled'}\nAdmin level: {person.admin_level}\nReceive level: {person.receive_level}"
+        rows = [[InlineKeyboardButton(f"Receive {n}", callback_data=f"rl:{n}") for n in alert_levels() if n >= person.admin_level]] if person.alerts_active else [[InlineKeyboardButton("Subscribe to alerts", callback_data="al:yes")]]
+    if person.alerts_active:
         rows.append([InlineKeyboardButton("Unsubscribe", callback_data="al:no")])
     await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
@@ -1186,8 +1245,8 @@ async def on_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     with session() as db:
         person = ensure_user(db, update.effective_user.id, update.effective_user.username)
-        person.alerts_enabled = False
-        markup = _start_keyboard(bool(person.uses_vpn), False)
+        person.interested_in_alerts = False
+        markup = _start_keyboard({row.topic for row in person.interests if row.enabled}, person.alerts_approved)
     await update.effective_message.reply_text(
         "You are unsubscribed from alerts. You can subscribe again at any time.",
         reply_markup=markup,

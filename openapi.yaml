@@ -60,7 +60,7 @@ paths:
         Одинаковые bytes дедуплицируются. Отсутствующее/null/пустое images ничего не удаляет;
         более короткий список сохраняет прежние оставшиеся слоты. Новая generation начинает без фото.
         Фото получают только исходные admitted intents текущей generation и новые intents эскалации;
-        перед HTTP проверяется alerts_enabled. Изменение настроек не создаёт backlog.
+        перед HTTP проверяется интерес alerts и сохранённое одобрение владельца. Изменение настроек не создаёт backlog.
         Lease finite, ownership fenced; Telegram accepted-but-untracked может дать повтор после timeout,
         exactly-once не гарантируется. Payload images не возвращается в list API.
         Повтор того же алерта правит уже отправленную карточку. Resolved дописывается

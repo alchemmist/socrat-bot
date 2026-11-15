@@ -86,9 +86,10 @@ The link label is `SPI`. The same alert sent again keeps the link. `key` may be 
 
 ## VPN list and scheduled broadcast
 
-`/start` stores the Telegram user. The reply is `Socrat is online.` with `I use VPN` and `Subscribe to alerts` until each one is done. Pressing the VPN button sets `uses_vpn` and does not change an owner into a regular user. A normal user becomes role `vpn`. The broadcast audience is everyone with `uses_vpn`, including an owner who opted in. A panel link code is separate and does not by itself add the person to this list.
+`/start` welcomes the user with **Welcome to Socrat Bot!** / **I'm interested in…** and independent **VPN** / **Alerts** checkboxes. Any number can be selected; clicking a checked item turns only that interest off. Interests are persisted as `(user_id, topic, enabled)` rows in `user_interests`, not separate user columns. Add capabilities to `interests.INTERESTS`; adding a topic needs no user-table migration. Roles describe authority (`owner` / `user`), not interests.
 
-`Subscribe to alerts` asks an owner to approve. After approval, `alerts_approved` and `alerts_enabled` are set and that chat receives cards according to its receive level (see below). Mute still creates one Alertmanager silence and updates every admin's copy of that card: the buttons go away and the message says how long it is muted. The owner is subscribed from the start.
+**VPN** controls eligibility for VPN mailings. It neither grants nor revokes VPN access or changes panel links. **Alerts** records a selection immediately and asks an owner to approve. Until approval the box is checked/pending but no alerts are delivered. Existing approvals survive turning Alerts off; selecting it again needs no new approval and replays no backlog. Approval never reverses a pending opt-out. The owner's default Alerts selection remains enabled, but an owner's explicit opt-out survives `/start`. Old `vpn:yes`, `al:yes`, `al:no`, approval callbacks and `/alerts` / `/unsubscribe` commands remain supported; all interest controls require private chat. Mute and escalation behavior is unchanged.
+
 
 The owner lists those Telegram accounts with `/clients`. Each known username is shown as `@username`. Someone who only pressed `/start` is not included.
 
@@ -113,7 +114,7 @@ Escalate advances exactly one tier toward the smallest. Keep configured levels
 stable while incidents are open. The owner starts with admin 10 / receive 20;
 migration 0010 gives all other existing users admin 20 / receive 20. Newly
 approved users start at the largest (lowest-authority) configured tier.
-`alerts_approved` stores permanent owner approval; `alerts_enabled` controls current delivery. There is no new role.
+`alerts_approved` stores permanent owner approval; current delivery requires the Alerts interest AND this approval. There is no role for a feature.
 
 In private Telegram chat:
 
@@ -348,7 +349,7 @@ requests.post("http://socrat-bot:8080/v1/messages", headers={
 * Desired bytes and per-recipient receipts survive restart. The original admitted
   audience is reused; escalation's newly admitted recipients get retained images.
   Settings changes alone do not admit recipients or create an image backlog.
-  `alerts_enabled` is rechecked immediately before each HTTP operation.
+  the Alerts interest and owner approval are rechecked immediately before each HTTP operation.
 * Media uses the same per-card finite CAS lease as text/SPI dispatch, but has its
   own retry worker so photo outages do not stall the text retry loop. No network
   runs inside a transaction. A send already in flight cannot be recalled by an
