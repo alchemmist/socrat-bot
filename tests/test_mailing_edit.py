@@ -311,8 +311,8 @@ def test_command_permissions_parsing_and_listing(store, application, monkeypatch
     message.text = '/mailing hello'
     asyncio.run(application.app.on_mailing(update, context))
     with database.session() as db:
-        choosing = db.scalar(select(Broadcast).where(Broadcast.status == 'choosing'))
-        assert choosing.message_id == 80
+        choosing = db.scalar(select(Broadcast).where(Broadcast.status == 'selecting_group'))
+        assert choosing.message_id == 80 and choosing.audience_group is None
 
 
 def test_receipt_write_failure_is_not_rejection(store, application, monkeypatch):
@@ -389,10 +389,15 @@ def test_native_preview_separate_body(store, application):
                               reply_text=AsyncMock(return_value=SimpleNamespace(message_id=88)))
     update = SimpleNamespace(message=message, effective_user=SimpleNamespace(id=1))
     asyncio.run(application.app.on_mailing(update, SimpleNamespace(args=[])))
-    preview = message.reply_text.call_args_list[0]
+    with database.session() as db:
+        identity = db.scalar(select(Broadcast.id).where(Broadcast.status == 'selecting_group'))
+    from unittest.mock import AsyncMock
+    query = SimpleNamespace(data=f'mg:{identity}:vpn', from_user=SimpleNamespace(id=1), message=message, answer=AsyncMock(), edit_message_text=AsyncMock())
+    asyncio.run(application.app.on_callback(SimpleNamespace(callback_query=query), SimpleNamespace(args=[])))
+    preview = message.reply_text.call_args_list[1]
     assert preview.args == ('😀\nlink',)
     assert preview.kwargs['parse_mode'] is None
     assert preview.kwargs['entities'][0].offset == 3
     with database.session() as db:
-        row = db.scalar(select(Broadcast).where(Broadcast.status == 'choosing'))
+        row = db.scalar(select(Broadcast).where(Broadcast.status == 'group_choosing'))
         assert row.entities[0]['url'] == 'https://example.org/hidden'

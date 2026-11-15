@@ -84,22 +84,20 @@ X-Internal-Token: ...
 
 The link label is `SPI`. The same alert sent again keeps the link. `key` may be sent instead of `alert`. A card that has not been rendered since this field existed answers `409` until the next alert update stores its text.
 
-## VPN list and scheduled broadcast
+## Interests and group mailings
 
-`/start` welcomes the user with **Welcome to Socrat Bot!** / **I'm interested in…** and independent **VPN** / **Alerts** checkboxes. Any number can be selected; clicking a checked item turns only that interest off. Interests are persisted as `(user_id, topic, enabled)` rows in `user_interests`, not separate user columns. Add capabilities to `interests.INTERESTS`; adding a topic needs no user-table migration. Roles describe authority (`owner` / `user`), not interests.
+`/start` welcomes the user with **Welcome to Socrat Bot!** / **I'm interested in…** and independent **VPN** / **Alerts** / **LLM** checkboxes. Any number can be selected; clicking a checked item turns only that interest off. Interests are persisted as `(user_id, topic, enabled)` rows in `user_interests`, not separate user columns. Add capabilities to `interests.INTERESTS`; adding a topic needs no user-table migration. Roles describe authority (`owner` / `user`), not interests.
 
 **VPN** controls eligibility for VPN mailings. It neither grants nor revokes VPN access or changes panel links. **Alerts** records a selection immediately and asks an owner to approve. Until approval the box is checked/pending but no alerts are delivered. Existing approvals survive turning Alerts off; selecting it again needs no new approval and replays no backlog. Approval never reverses a pending opt-out. The owner's default Alerts selection remains enabled, but an owner's explicit opt-out survives `/start`. Old `vpn:yes`, `al:yes`, `al:no`, approval callbacks and `/alerts` / `/unsubscribe` commands remain supported; all interest controls require private chat. Mute and escalation behavior is unchanged.
 
 
 The owner lists those Telegram accounts with `/clients`. Each known username is shown as `@username`. Someone who only pressed `/start` is not included.
 
-The owner starts a mailing with the text:
+The owner starts with `/mailing`, chooses **VPN**, **Alerts** or **LLM**, then sends the message text (including native styles/hidden links). Composition is durable across bot restarts. A new `/mailing` cancels an unfinished group/text draft, not scheduled mailings. **Cancel** discards a group/text draft. `/mailing TEXT` remains a shortcut: text is saved, but a group must still be explicitly chosen before preview/scheduling.
 
-```
-/mailing Maintenance tonight
-```
+The selected group is persisted in `Broadcast.audience_group`, shown in controls, delivery summaries and mailing history. Recipients are evaluated from that group's current interests at send time, as before for VPN: VPN and LLM require their selected interest; Alerts additionally requires owner approval. Joining/leaving another group never changes this mailing's target. Existing mailings migrate to VPN; no existing user is auto-opted into LLM. The internal plaintext `POST /v1/broadcasts` keeps its legacy VPN default. Invalid/missing groups never fall back to another audience. Editing still touches ONLY saved original recipient copies, regardless of later interest changes, with no replacement sends.
 
-The bot then offers the next seven days and Now. After a day, it offers every hour from 08:00 through 22:00 in `Europe/Moscow`. Hours that already passed today are hidden. Now sends immediately. A scheduled mailing is sent when that time arrives. The check runs about every 15 seconds. `BROADCAST_TZ` overrides the zone.
+After text preview, the bot offers the next seven days and Now. After a day, it offers every hour from 08:00 through 22:00 in `Europe/Moscow`. Hours that already passed today are hidden. Now sends immediately. A scheduled mailing is sent when that time arrives. The check runs about every 15 seconds. `BROADCAST_TZ` overrides the zone.
 
 ## socrat-sudo
 

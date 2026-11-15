@@ -17,6 +17,7 @@ from socrat_bot.models import (
     SudoRequest,
     TelegramCard,
     User,
+    UserInterest,
     utcnow,
 )
 
@@ -126,13 +127,13 @@ def claim_due_broadcasts(db: Session, now: datetime | None = None) -> list[Broad
     moment = now or datetime.now(timezone.utc)
     rows = list(
         db.scalars(
-            select(Broadcast).where(Broadcast.status == "scheduled", Broadcast.send_at.is_not(None), Broadcast.send_at <= moment)
+            select(Broadcast).where(Broadcast.status.in_(("scheduled", "group_scheduled")), Broadcast.send_at.is_not(None), Broadcast.send_at <= moment)
         )
     )
     claimed = []
     for row in rows:
         if db.execute(update(Broadcast).where(
-            Broadcast.id == row.id, Broadcast.status == "scheduled",
+            Broadcast.id == row.id, Broadcast.status == row.status,
         ).values(status="sending")).rowcount:
             claimed.append(row)
     db.flush()
@@ -230,6 +231,17 @@ def vpn_audience(db: Session) -> list[User]:
     return list(db.scalars(select(User).where(User.interested_in_vpn.is_(True))))
 
 
+def mailing_audience(db: Session, group: str | None) -> list[User]:
+    from .mailing_compose import GROUPS
+    if group not in GROUPS:
+        raise ValueError("Unknown mailing group; delivery refused")
+    if group == "alerts":
+        return alert_recipients(db)  # Preserve the existing owner-approval boundary.
+    return list(db.scalars(select(User).where(User.interests.any(
+        (UserInterest.topic == group) & UserInterest.enabled
+    )).order_by(User.telegram_id)))
+
+
 def card_messages(db: Session, key: str) -> list[tuple[int, int]]:
     rows = db.scalars(
         select(TelegramCard)
@@ -245,7 +257,7 @@ def audience(db: Session) -> dict:
         return {"telegram_id": user.telegram_id, "username": user.username, "admin_level": user.admin_level, "receive_level": user.receive_level}
 
     vpn = sorted(vpn_audience(db), key=lambda user: user.telegram_id)
-    return {"vpn": [person(user) for user in vpn], "alerts": [person(user) for user in alert_recipients(db)]}
+    return {"vpn": [person(user) for user in vpn], "alerts": [person(user) for user in alert_recipients(db)], "llm": [person(user) for user in mailing_audience(db, "llm")]}
 
 
 
@@ -361,7 +373,7 @@ async def _dispatch(db: Session, action: Action) -> dict:
         if row is None or row.status not in {"preview", "draft"}:
             return {"status": "unavailable", "sent": 0, "failed": []}
         text, broadcast_id = row.text, row.id
-        recipients = [user.telegram_id for user in vpn_audience(db)]
+        recipients = [user.telegram_id for user in mailing_audience(db, row.audience_group)]
         row.status = "sending"
         db.commit()  # Persist the action claim and release the transaction before HTTP.
         result = await deliver_broadcast(text, recipients, broadcast_id)

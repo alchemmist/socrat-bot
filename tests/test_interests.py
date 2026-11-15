@@ -168,6 +168,7 @@ def test_start_keeps_flags_and_renders_all_registered_topics(
     assert [row[0].callback_data for row in keyboard.inline_keyboard] == [
         "interest:vpn:off",
         "interest:alerts:off",
+        "interest:llm:on",
         "interest:future:off",
     ]
     with database.session() as db:

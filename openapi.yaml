@@ -160,7 +160,7 @@ paths:
       tags: [vpn]
       operationId: createLinkCode
       summary: Выдать одноразовый код привязки клиента панели
-      description: Код не добавляет человека в список VPN сам по себе. Список рассылки — это те, кто нажал «I use VPN».
+      description: Код не добавляет человека в список VPN сам по себе. Список VPN-рассылки — те, кто выбрал интерес VPN.
       requestBody:
         required: true
         content:
@@ -364,13 +364,13 @@ paths:
     get:
       tags: [alerts, vpn]
       operationId: getAudience
-      summary: Кто на VPN и кто подписан на алерты
+      summary: Получатели групп VPN, Alerts и LLM
       description: |
         username без символа @. Его может не быть, тогда остаётся telegram_id.
-        Список VPN — только те, кто нажал «I use VPN», не все, кто нажал /start.
+        Списки VPN и LLM — по выбранным интересам; Alerts — выбранный интерес и одобрение владельца.
       responses:
         "200":
-          description: Два списка
+          description: Три списка по группам
           content:
             application/json:
               schema:
@@ -718,6 +718,10 @@ components:
     Audience:
       type: object
       properties:
+        llm:
+          type: array
+          items:
+            $ref: "#/components/schemas/Person"
         vpn:
           type: array
           items:

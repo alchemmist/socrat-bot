@@ -131,6 +131,7 @@ class Audit(Base):
 
 
 class Broadcast(Base):
+    audience_group: Mapped[str | None] = mapped_column(String(64).evaluates_none(), nullable=True, default="vpn", server_default="vpn")
     entities: Mapped[list] = mapped_column(JSONType, default=list, server_default="[]")
     __tablename__ = "broadcasts"
     edit_token: Mapped[str | None] = mapped_column(String(36), nullable=True)

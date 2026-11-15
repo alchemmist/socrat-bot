@@ -39,10 +39,10 @@ def editable_mailings(owner_id: int) -> list[tuple]:
     delivered_at = func.max(BroadcastCopy.sent_at)
     with session() as db:
         return list(db.execute(
-            select(Broadcast.id, Broadcast.text, delivered_at)
+            select(Broadcast.id, Broadcast.text, delivered_at, Broadcast.audience_group)
             .join(BroadcastCopy, BroadcastCopy.broadcast_id == Broadcast.id)
             .where(Broadcast.chat_id == owner_id, Broadcast.status == "sent")
-            .group_by(Broadcast.id, Broadcast.text)
+            .group_by(Broadcast.id, Broadcast.text, Broadcast.audience_group)
             .order_by(delivered_at.desc(), Broadcast.id.desc())
         ))
 
@@ -59,11 +59,11 @@ def panel(owner_id: int, *, show_all: bool = False, page: int = 0) -> tuple[str,
     selected = rows if show_all else rows[:3]
     blocks = []
     zone = broadcast_zone()
-    for number, (identity, text, sent_at) in enumerate(selected, 1):
+    for number, (identity, text, sent_at, group) in enumerate(selected, 1):
         date = as_utc(sent_at).astimezone(zone).strftime("%d %b %Y · %H:%M")
         blocks.append(
             f"<b>{number}.</b> <code>{identity}</code>\n"
-            f"<i>{escape(date)} · {escape(zone.key)}</i>\n"
+            f"<i>{escape(date)} · {escape(zone.key)} · {escape((group or 'unknown').upper())}</i>\n"
             f"<pre>{excerpt(text)}</pre>"
         )
     footer = (

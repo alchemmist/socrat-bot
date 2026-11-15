@@ -14,7 +14,7 @@ from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from socrat_bot import media
 from socrat_bot.cards import (
@@ -43,7 +43,6 @@ from socrat_bot.logic import (
     apply_action,
     approve_alerts,
     audience,
-    begin_mailing,
     broadcast_zone,
     card_messages,
     claim_due_broadcasts,
@@ -56,6 +55,7 @@ from socrat_bot.logic import (
     get_card,
     is_owner,
     list_cards,
+    mailing_audience,
     mailing_dates,
     mailing_hours,
     mailing_slot,
@@ -297,7 +297,7 @@ def _start_text(interests: set[str], approved: bool) -> str:
         if item.approval_required and item.key in interests and not approved:
             state = "awaiting owner approval"
         lines.append(f"{item.label}: {state}")
-    lines.extend(["", "VPN enables VPN mailings; it does not create or remove VPN access.", "Alerts require owner approval. Turning them off keeps that approval."])
+    lines.extend(["", "VPN enables VPN mailings; it does not create or remove VPN access.", "LLM enables LLM mailings; it does not issue an API key.", "Alerts require owner approval. Turning them off keeps that approval."])
     return "\n".join(lines)
 
 
@@ -339,37 +339,8 @@ async def on_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    user = update.effective_user
-    if message is None or user is None:
-        return
-    if message.chat_id != user.id:
-        await message.reply_text("This command is available in private chat only.")
-        return
-    from .entities import command_body
-    try:
-        text, entities = command_body(message)
-    except ValueError as exc:
-        await message.reply_text(str(exc))
-        return
-    with session() as db:
-        if not is_owner(db, user.id):
-            await message.reply_text("This command is available to the owner only.")
-            return
-        if not text:
-            await message.reply_text("Usage: /mailing message text")
-            return
-        row = begin_mailing(db, user.id, text, entities)
-        broadcast_id = row.id
-    from telegram import MessageEntity
-    await message.reply_text(text, entities=[MessageEntity.de_json(item, getattr(context, "bot", None)) for item in entities], parse_mode=None)
-    response = await message.reply_text(
-        "Pick a day. Time is Europe/Moscow.",
-        reply_markup=_date_keyboard(broadcast_id, datetime.now(broadcast_zone())),
-    )
-
-    with session() as db:
-        db.get(Broadcast, broadcast_id).message_id = response.message_id
+    from .mailing_compose import start
+    await start(update, context)
 
 
 async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -441,7 +412,7 @@ async def _on_mailing_callback(query, data: str) -> bool:
             notice = "This command is available to the owner only."
         else:
             row = db.get(Broadcast, broadcast_id)
-            if row is None or row.status != "choosing":
+            if row is None or row.status not in {"choosing", "group_choosing"} or row.chat_id != query.from_user.id:
                 return True
             now = datetime.now(broadcast_zone())
             if kind == "d" and len(parts) == 4:
@@ -469,20 +440,23 @@ async def _on_mailing_callback(query, data: str) -> bool:
                     )
                     return True
                 send_at = mailing_slot(day, hour)
-                row.send_at = send_at
-                row.status = "scheduled"
-                count = len(vpn_audience(db))
+                if not db.execute(sql_update(Broadcast).where(
+                    Broadcast.id == broadcast_id, Broadcast.status == row.status,
+                    Broadcast.chat_id == query.from_user.id,
+                ).values(status="group_scheduled" if row.status == "group_choosing" else "scheduled", send_at=send_at)).rowcount:
+                    return True
+                count = len(mailing_audience(db, row.audience_group))
                 local = send_at.astimezone(broadcast_zone()).strftime("%Y-%m-%d %H:%M")
-                notice = f"Scheduled for {local} {broadcast_zone().key}. VPN recipients now: {count}.\nMailing {broadcast_id}\nAfter delivery: /mailing_edit {broadcast_id} NEW_TEXT"
+                notice = f"Scheduled for {local} {broadcast_zone().key}. Group: {row.audience_group.upper()}. Recipients now: {count}.\nMailing {broadcast_id}\nAfter delivery: /mailing_edit {broadcast_id} NEW_TEXT"
             elif kind == "n":
                 claimed = db.execute(sql_update(Broadcast).where(
-                    Broadcast.id == broadcast_id, Broadcast.status == "choosing",
+                    Broadcast.id == broadcast_id, Broadcast.status == row.status,
                     Broadcast.chat_id == query.from_user.id,
                 ).values(status="sending")).rowcount
                 if not claimed:
                     return True
                 pending_text = row.text
-                pending_ids = [user.telegram_id for user in vpn_audience(db)]
+                pending_ids = [user.telegram_id for user in mailing_audience(db, row.audience_group)]
             else:
                 return True
     if pending_text is not None:
@@ -493,7 +467,7 @@ async def _on_mailing_callback(query, data: str) -> bool:
                 stored.status = "sent"
                 stored.sent = result["sent"]
                 stored.failed = result["failed"] + [{"accepted_untracked": item} for item in result.get("untracked", [])]
-        notice = _delivery_notice("Sent now", result) + f"\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT"
+        notice = _delivery_notice("Sent now", result) + f"\nGroup: {row.audience_group.upper()}\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT"
     if notice:
         await query.edit_message_text(notice)
     return True
@@ -583,6 +557,9 @@ async def _approve_alerts(query) -> None:
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
+        return
+    from .mailing_compose import group_callback
+    if await group_callback(query, context):
         return
     from .mailing_list import on_list_callback
     if await on_list_callback(query):
@@ -705,7 +682,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 candidate.status = "failed"
                 return
             row.status = "sending"
-            legacy = (row.id, row.text, [person.telegram_id for person in vpn_audience(db)])
+            legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
     if legacy:
         broadcast_id, body, recipients = legacy
         result = await deliver_broadcast(body, recipients, broadcast_id)
@@ -788,7 +765,7 @@ async def _broadcast_loop() -> None:
                     if row is None:
                         continue
                     text = row.text
-                    recipients = [user.telegram_id for user in vpn_audience(db)]
+                    recipients = [user.telegram_id for user in mailing_audience(db, row.audience_group)]
                 result = await deliver_broadcast(text, recipients, broadcast_id)
                 with session() as db:
                     row = db.get(Broadcast, broadcast_id)
@@ -872,6 +849,8 @@ async def lifespan(app: FastAPI):
         for command in COMMANDS:
             ptb.add_handler(CommandHandler(command.name, globals()[command.handler]))
         ptb.add_handler(CallbackQueryHandler(on_callback))
+        from .mailing_compose import receive_text
+        ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text))
         await ptb.initialize()
         await ptb.start()
         await _register_webhook()
