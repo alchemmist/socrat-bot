@@ -289,16 +289,13 @@ async def _remember_usernames(telegram_ids: list[int]) -> None:
 
 
 def _start_text(interests: set[str], approved: bool) -> str:
-    from .interests import INTERESTS
-
-    lines = ["Welcome to Socrat Bot!", "", "I'm interested in…", "Choose any number of interests. Tap again to turn one off.", ""]
-    for item in INTERESTS:
-        state = "on" if item.key in interests else "off"
-        if item.approval_required and item.key in interests and not approved:
-            state = "awaiting owner approval"
-        lines.append(f"{item.label}: {state}")
-    lines.extend(["", "VPN enables VPN mailings; it does not create or remove VPN access.", "LLM enables LLM mailings; it does not issue an API key.", "Alerts require owner approval. Turning them off keeps that approval."])
-    return "\n".join(lines)
+    del interests, approved
+    return "\n".join([
+        "Welcome to Socrat Bot!",
+        "",
+        "I'm interested in…",
+        "Choose any number of interests. Tap again to turn one off.",
+    ])
 
 
 def _start_keyboard(interests: set[str], approved: bool) -> InlineKeyboardMarkup:

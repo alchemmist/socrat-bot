@@ -71,7 +71,8 @@ def test_independent_flags_and_private_only(interests_store):
     click(query("interest:vpn:on"))
     q = query("interest:alerts:on")
     click(q)
-    assert "awaiting owner approval" in q.edit_message_text.call_args.args[0]
+    markup = q.edit_message_text.call_args.kwargs["reply_markup"]
+    assert any("pending approval" in row[0].text for row in markup.inline_keyboard)
     with database.session() as db:
         user = ensure_user(db, 2)
         assert user.interested_in_vpn and user.interested_in_alerts
@@ -163,8 +164,9 @@ def test_start_keeps_flags_and_renders_all_registered_topics(
     asyncio.run(app.on_start(update, NS(args=[])))
     body = msg.reply_text.call_args.args[0]
     assert "Welcome to Socrat Bot!" in body and "I'm interested in" in body
-    assert "awaiting owner approval" in body
+    assert "VPN:" not in body and "does not create" not in body
     keyboard = msg.reply_text.call_args.kwargs["reply_markup"]
+    assert any("pending approval" in row[0].text for row in keyboard.inline_keyboard)
     assert [row[0].callback_data for row in keyboard.inline_keyboard] == [
         "interest:vpn:off",
         "interest:alerts:off",
