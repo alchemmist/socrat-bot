@@ -10,7 +10,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from telegram.error import BadRequest
@@ -290,4 +290,26 @@ def test_populated_interests_upgrade_and_legacy_bridge(tmp_path, backend):
         assert conn.scalar(text("SELECT uses_vpn FROM users WHERE telegram_id=2"))
         assert conn.scalar(text("SELECT alerts_enabled FROM users WHERE telegram_id=2"))
     migrate("upgrade", "head")
+    assert not {"uses_vpn", "alerts_enabled"} & {
+        c["name"] for c in inspect(engine).get_columns("users")
+    }
+    with sessionmaker(engine)() as db:
+        u = db.scalar(select(User).where(User.telegram_id == 2))
+        u.set_interest("future-capability", True)
+        u.interested_in_alerts = False
+        db.commit()
+        assert u.interested_in_vpn and u.alerts_approved and not u.alerts_active
+    # Contract downgrade/re-upgrade restores rollback compatibility without
+    # losing independent, unknown future topic flags or silently resubscribing.
+    migrate("downgrade", "0020_user_interests")
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT uses_vpn FROM users WHERE telegram_id=2"))
+        assert not conn.scalar(
+            text("SELECT alerts_enabled FROM users WHERE telegram_id=2")
+        )
+    migrate("upgrade", "head")
+    with sessionmaker(engine)() as db:
+        u = db.scalar(select(User).where(User.telegram_id == 2))
+        assert u.interested_in("future-capability")
+        assert u.interested_in_vpn and u.alerts_approved and not u.alerts_active
     engine.dispose()

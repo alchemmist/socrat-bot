@@ -51,7 +51,7 @@ def test_sqlite_populated_upstream_desired_fence_upgrade_and_downgrade(tmp_path)
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0020_user_interests"
+            == "0021_interest_contract"
         )
     engine.dispose()
 
@@ -86,7 +86,7 @@ def test_persistent_approval_backfills_current_and_historical_subscribers(tmp_pa
         ), {"id": uuid.uuid4().hex})
     subprocess.run(command + ["upgrade", "head"], env=env, capture_output=True, check=True)
     with engine.connect() as connection:
-        rows = connection.execute(text("SELECT telegram_id, alerts_enabled, alerts_approved FROM users ORDER BY telegram_id")).all()
+        rows = connection.execute(text("SELECT telegram_id, EXISTS (SELECT 1 FROM user_interests WHERE user_id=users.id AND topic='alerts' AND enabled), alerts_approved FROM users ORDER BY telegram_id")).all()
         assert [(tid, bool(enabled), bool(approved)) for tid, enabled, approved in rows] == [
             (1, False, True), (2, True, True), (3, False, True), (4, False, False)
         ]
