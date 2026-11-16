@@ -859,18 +859,10 @@ def _result_text(action: Action, result: dict) -> str:
         footer = _muted_footer(minutes) if result.get("status") == "silenced" else _muted_footer(minutes, f"Mute failed: {result}")
         card = (action.payload or {}).get("card")
         return _with_footer(card or "", footer)
-    if action.type == "xui.upgrade":
-        if result.get("status") == "updated":
-            return f"3X-UI updated: {result.get('image')}"
-        if result.get("status") == "rolled_back":
-            return "Automation restored the working version. Further checks have to be done manually."
-        return f"Upgrade: {result}"
     if action.type == "broadcast.send":
         return _delivery_notice("Broadcast", result)
     if action.type == "broadcast.cancel":
         return "Broadcast cancelled."
-    if action.type in {"sudo.approve", "sudo.deny"}:
-        return f"Sudo {result.get('status')}: {result.get('argv')}"
     return str(result)
 
 

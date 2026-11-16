@@ -1169,14 +1169,14 @@ def test_custom_card_actions_keep_keyboard_and_message_identity(store, monkeypat
     initial_users()
     _people, jobs = submit_card(
         Card(key="custom", title="Custom"),
-        [{"type": "xui.upgrade", "label": "Upgrade", "payload": {}, "row": 0}],
+        [{"type": "alert.silence", "label": "Upgrade", "payload": {}, "row": 0}],
     )
     calls = response_client(monkeypatch)
     asyncio.run(dispatch_jobs(jobs))
     for _method, body in calls:
         assert body["reply_markup"]["inline_keyboard"][0][0]["text"] == "Upgrade"
     with database.session() as db:
-        for action in db.scalars(select(Action).where(Action.type == "xui.upgrade")):
+        for action in db.scalars(select(Action).where(Action.type == "alert.silence")):
             assert action.message_id == 1000 + action.chat_id
 
 

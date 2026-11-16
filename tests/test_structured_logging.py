@@ -67,8 +67,7 @@ def test_actual_entrypoints_emit_owned_json(tmp_path):
     import time
     import urllib.request
 
-    for module, component in [('socrat_bot', 'bot'), ('socrat_bot.broker', 'broker'),
-                              ('socrat_bot.updater', 'updater')]:
+    for module, component in [('socrat_bot', 'bot')]:
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]

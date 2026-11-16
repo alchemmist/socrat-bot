@@ -25,9 +25,6 @@ ACTION_TYPES = {
     "alert.silence",
     "broadcast.send",
     "broadcast.cancel",
-    "xui.upgrade",
-    "sudo.approve",
-    "sudo.deny",
 }
 
 
@@ -395,12 +392,6 @@ async def _dispatch(db: Session, action: Action) -> dict:
         if row:
             row.status = "cancelled"
         return {"status": "cancelled"}
-    if action.type == "xui.upgrade":
-        return await _upgrade()
-    if action.type == "sudo.approve":
-        return _sudo_decision(db, action, "approved")
-    if action.type == "sudo.deny":
-        return _sudo_decision(db, action, "denied")
     raise ValueError(f"unknown action {action.type}")
 
 
@@ -474,28 +465,6 @@ async def deliver_broadcast(text: str, recipients: list[int], broadcast_id=None)
     if untracked:
         result["untracked"] = untracked
     return result
-
-
-async def _upgrade() -> dict:
-    base = os.environ.get("XUI_UPDATER_URL", "http://socrat-bot-xui-updater.socrat-bot.svc:8080")
-    async with httpx.AsyncClient(timeout=300) as client:
-        response = await client.post(f"{base}/upgrade")
-        response.raise_for_status()
-        return response.json()
-
-
-def _sudo_decision(db: Session, action: Action, status: str) -> dict:
-    row = db.get(SudoRequest, uuid.UUID(action.payload["request_id"]))
-    if row is None:
-        return {"status": "missing"}
-    # Approved and consumed stay closed: a second click must not reopen the request.
-    if row.status != "pending":
-        return {"status": row.status, "replayed": True, "request_id": str(row.id)}
-    if as_utc(row.expires_at) <= datetime.now(timezone.utc):
-        row.status = "expired"
-        return {"status": "expired", "request_id": str(row.id)}
-    row.status = status
-    return {"status": status, "request_id": str(row.id), "argv": row.argv, "node": row.node}
 
 
 def alert_levels() -> list[int]:

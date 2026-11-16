@@ -27,7 +27,6 @@ dev = [
 ]
 
 [project.scripts]
-socrat-sudo = "socrat_sudo.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
