@@ -329,15 +329,25 @@ def approve_alerts(db: Session, telegram_id: int, username: str | None = None) -
     return user
 
 
-def format_vpn_clients(users: list[User]) -> str:
+def interest_users(db: Session, topic: str) -> list[User]:
+    return list(db.scalars(select(User).where(User.interests.any(
+        (UserInterest.topic == topic) & UserInterest.enabled
+    )).order_by(User.telegram_id)))
+
+
+def format_interest_users(label: str, users: list[User]) -> str:
     ordered = sorted(users, key=lambda user: user.telegram_id)
     if not ordered:
-        return "Interested in VPN: 0"
-    lines = [f"Interested in VPN: {len(ordered)}"]
+        return f"Interested in {label}: 0"
+    lines = [f"Interested in {label}: {len(ordered)}"]
     lines.extend(
         f"\u2022 @{user.username}" if user.username else f"\u2022 {user.telegram_id}" for user in ordered
     )
     return "\n".join(lines)
+
+
+def format_vpn_clients(users: list[User]) -> str:
+    return format_interest_users("VPN", users)
 
 
 async def apply_action(db: Session, action: Action, actor: str) -> dict:

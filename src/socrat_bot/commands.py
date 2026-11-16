@@ -29,7 +29,7 @@ COMMANDS = (
     Command("start", "Choose the bot features you are interested in", "on_start"),
     Command("alerts", "View alert settings and choose a receive level", "on_alerts"),
     Command("unsubscribe", "Stop alert notifications; keep your approval", "on_unsubscribe"),
-    Command("clients", "List users interested in VPN", "on_clients", owner_only=True),
+    Command("users", "List users by interest", "on_users", owner_only=True),
     Command("alertlevel", "Assign an admin level: /alertlevel TELEGRAM_ID LEVEL", "on_alertlevel", owner_only=True),
     Command("mailing", "Choose a group, write and schedule a mailing", "on_mailing", owner_only=True),
     Command("mailing_edit", "Edit a sent mailing: /mailing_edit UUID TEXT", "on_mailing_edit", owner_only=True),

@@ -67,7 +67,7 @@ receive mode не переигрывает существующие firing; но
 `X-Internal-Token`. Публичный адрес `https://bot.socrat.alchemmist.xyz` принимает
 только `POST /telegram/webhook` и заголовок `X-Telegram-Bot-Api-Secret-Token`.
 
-Команды `/start`, `/mailing`, `/clients`, `/alerts` и `/alertlevel` в этот API не входят: их нажимают люди
+Команды `/start`, `/mailing`, `/users`, `/alerts` и `/alertlevel` в этот API не входят: их нажимают люди
 в Telegram. Sudo и обновление 3X-UI живут в отдельных процессах и сюда тоже не входят.
 
 ## Методы

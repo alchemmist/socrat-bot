@@ -177,6 +177,37 @@ def test_start_keeps_flags_and_renders_all_registered_topics(
         assert not ensure_user(db, 2).alerts_approved
 
 
+def test_users_command_lists_one_interest(interests_store):
+    with database.session() as db:
+        owner = ensure_user(db, 1)
+        owner.role = "owner"
+        vpn = ensure_user(db, 2)
+        vpn.username = "ada"
+        vpn.interested_in_vpn = True
+        vpn.interested_in_alerts = True
+        llm = ensure_user(db, 3)
+        llm.set_interest("llm", True)
+    msg = NS(reply_text=AsyncMock())
+    update = NS(effective_user=NS(id=1, username=None), message=msg)
+    asyncio.run(app.on_users(update, NS()))
+    keyboard = msg.reply_text.call_args.kwargs["reply_markup"]
+    assert [row[0].callback_data for row in keyboard.inline_keyboard] == [
+        "users:vpn",
+        "users:alerts",
+        "users:llm",
+    ]
+    q = query("users:alerts", actor=1)
+    click(q)
+    assert q.edit_message_text.call_args.args[0] == "Interested in Alerts: 2\n\u2022 1\n\u2022 @ada"
+    assert "reply_markup" not in q.edit_message_text.call_args.kwargs
+    q = query("users:llm", actor=1)
+    click(q)
+    assert q.edit_message_text.call_args.args[0] == "Interested in LLM: 1\n\u2022 3"
+    stranger = NS(reply_text=AsyncMock())
+    asyncio.run(app.on_users(NS(effective_user=NS(id=2), message=stranger), NS()))
+    assert "owner only" in stranger.reply_text.call_args.args[0].lower()
+
+
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 def test_populated_interests_upgrade_and_legacy_bridge(tmp_path, backend):
     url = f"sqlite+pysqlite:///{tmp_path / 'interest_test.db'}"

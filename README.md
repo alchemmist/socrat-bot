@@ -91,7 +91,7 @@ The link label is `SPI`. The same alert sent again keeps the link. `key` may be 
 **VPN** controls eligibility for VPN mailings. It neither grants nor revokes VPN access or changes panel links. **Alerts** records a selection immediately and asks an owner to approve. Until approval the box is checked/pending but no alerts are delivered. Existing approvals survive turning Alerts off; selecting it again needs no new approval and replays no backlog. Approval never reverses a pending opt-out. The owner's default Alerts selection remains enabled, but an owner's explicit opt-out survives `/start`. Old `vpn:yes`, `al:yes`, `al:no`, approval callbacks and `/alerts` / `/unsubscribe` commands remain supported; all interest controls require private chat. Mute and escalation behavior is unchanged.
 
 
-The owner lists those Telegram accounts with `/clients`. Each known username is shown as `@username`. Someone who only pressed `/start` is not included.
+The owner opens `/users` and picks VPN, Alerts, or LLM. The message is replaced with the people who selected that interest. Each known username is shown as `@username`. Someone who only pressed `/start` is not included. Alerts here means the interest is selected, including people still waiting for approval.
 
 The owner starts with `/mailing`, chooses **VPN**, **Alerts** or **LLM**, then sends the message text (including native styles/hidden links). Composition is durable across bot restarts. A new `/mailing` cancels an unfinished group/text draft, not scheduled mailings. **Cancel** discards a group/text draft. `/mailing TEXT` remains a shortcut: text is saved, but a group must still be explicitly chosen before preview/scheduling.
 
@@ -272,7 +272,7 @@ registers handlers from that registry and publishes complete lists with Telegram
 in managed scopes on the next startup.
 
 Default and all-private-chat menus contain `/start`, `/alerts`, `/unsubscribe`.
-Owner private-chat scopes add `/clients`, `/alertlevel`, `/mailing`. Configured
+Owner private-chat scopes add `/users`, `/alertlevel`, `/mailing`. Configured
 owner IDs and persisted owner users are included; an owner's `/start` also refreshes
 that personal scope after bootstrap. Language-independent, English, and Russian
 scope entries use the same English UI descriptions. Other manually configured

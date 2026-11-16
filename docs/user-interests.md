@@ -10,8 +10,8 @@ while approval is pending. Future topics need registry/feature wiring, not new
 boolean columns or mutually exclusive roles. Unknown callback topics are denied.
 
 - VPN selects VPN mailings, NOT VPN authorization. Existing panel links survive
-  toggles; link codes alone do not subscribe to mailings. `/clients` remains the
-  compatible owner command but lists **Interested in VPN**.
+  toggles; link codes alone do not subscribe to mailings. `/users` is the owner
+  command: it offers each registered interest and then lists who selected it.
 - Alerts selection is distinct from durable `users.alerts_approved`. An
   unapproved selection is shown as checked/pending; it cannot receive alerts,
   use alert actions or select an unauthorized receive tier. Owner approval never
