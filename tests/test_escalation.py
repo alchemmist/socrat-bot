@@ -1281,6 +1281,11 @@ def test_mute_completion_cannot_annotate_refired_incident(store, monkeypatch):
     async def answer(*args, **kwargs):
         pass
 
+    edited = Event()
+
+    async def optimistic_edit(*args, **kwargs):
+        edited.set()
+
     async def forbidden_edit(*args, **kwargs):
         pytest.fail("Old mute must not edit the new generation")
 
@@ -1290,7 +1295,8 @@ def test_mute_completion_cannot_annotate_refired_incident(store, monkeypatch):
         from_user=SimpleNamespace(id=2, username=None),
         message=SimpleNamespace(chat_id=2, message_id=102),
         answer=answer,
-        edit_message_text=forbidden_edit,
+        edit_message_text=optimistic_edit,
+        edit_message_caption=forbidden_edit,
     )
     context = SimpleNamespace(bot=SimpleNamespace(edit_message_text=forbidden_edit))
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1298,6 +1304,7 @@ def test_mute_completion_cannot_annotate_refired_incident(store, monkeypatch):
             asyncio.run, app.on_callback(SimpleNamespace(callback_query=query), context)
         )
         assert entered.wait(10)
+        assert edited.is_set()
         try:
             with database.session() as db:
                 route(db, "disk", False)

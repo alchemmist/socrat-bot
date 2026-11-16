@@ -51,8 +51,9 @@ from socrat_bot.logic import (
     as_utc,
     deliver_broadcast,
     ensure_user,
-    format_vpn_clients,
+    format_interest_users,
     get_card,
+    interest_users,
     is_owner,
     list_cards,
     mailing_audience,
@@ -62,7 +63,6 @@ from socrat_bot.logic import (
     mark_vpn,
     owner_ids,
     owners,
-    vpn_audience,
 )
 from socrat_bot.models import (
     Action,
@@ -316,23 +316,53 @@ def _person_label(user) -> str:
     return f"@{username}" if username else str(user.id)
 
 
-async def on_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _users_keyboard() -> InlineKeyboardMarkup:
+    from .interests import INTERESTS
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(item.label, callback_data=f"users:{item.key}")]
+        for item in INTERESTS
+    ])
+
+
+async def on_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     user = update.effective_user
     if message is None or user is None:
         return
     with session() as db:
         owner = is_owner(db, user.id)
-        people = vpn_audience(db) if owner else []
-        missing = [person.telegram_id for person in people if not person.username]
     if not owner:
         await message.reply_text("This command is available to the owner only.")
         return
+    await message.reply_text("Users", reply_markup=_users_keyboard())
+
+
+async def _on_users_topic(query) -> None:
+    from .interests import BY_KEY
+
+    topic = query.data.removeprefix("users:")
+    item = BY_KEY.get(topic)
+    if item is None:
+        await query.answer("Unknown interest")
+        return
+    with session() as db:
+        if not is_owner(db, query.from_user.id):
+            await query.answer("Owner only")
+            return
+        people = interest_users(db, topic)
+        missing = [person.telegram_id for person in people if not person.username]
+    await query.answer()
     if missing:
         await _remember_usernames(missing)
         with session() as db:
-            people = vpn_audience(db)
-    await message.reply_text(format_vpn_clients(people))
+            people = interest_users(db, topic)
+    text = format_interest_users(item.label, people)
+    try:
+        await query.edit_message_text(text)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -561,6 +591,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     from .mailing_list import on_list_callback
     if await on_list_callback(query):
         return
+    if query.data.startswith("users:"):
+        await _on_users_topic(query)
+        return
     if query.data.startswith("interest:"):
         from .interests import BY_KEY
         parts = query.data.split(":")
@@ -690,6 +723,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             action.status, action.result = "done", result
         await query.edit_message_text(_delivery_notice("Broadcast", result) + f"\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT")
         return
+    preview = None
+    preview_base = ""
+    preview_minutes = 60
+    preview_photo = False
     with session() as db:
         action = db.get(Action, action_id)
         if action is None:
@@ -705,7 +742,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
                 return
             mute_generation = incident.generation if incident else None
+            if mute_generation is not None:
+                preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
+                preview_minutes = int((action.payload or {}).get("minutes") or 60)
+                preview_photo = getattr(copy, "message_kind", None) == "photo"
+                preview = _with_footer(preview_base, _muted_footer(preview_minutes))
+    if preview:
+        await _show_muted_message(query, preview, preview_photo)
+    with session() as db:
+        action = db.get(Action, action_id)
         result = await apply_action(db, action, actor)
+        if preview and action.type == "alert.silence" and result.get("status") != "silenced":
+            failure = _with_footer(preview_base, _muted_footer(preview_minutes, f"Mute failed: {result}"))
+        else:
+            failure = None
         text = _result_text(action, result)
         html = bool((action.payload or {}).get("card"))
         copies = [(action.chat_id, action.message_id)] if action.message_id else []
@@ -731,6 +781,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     text = marker(text, incident)
         else:
             key = ""
+    if failure:
+        await _show_muted_message(query, failure, preview_photo)
     if key and text:
         footer = text[text.rfind("<i>"):] if "<i>" in text else "<i>Muted</i>"
         try:
@@ -777,13 +829,36 @@ async def _broadcast_loop() -> None:
             log.error("broadcast loop failed")
 
 
+async def _show_muted_message(query, text: str, photo: bool) -> None:
+    """Update the pressed card before Alertmanager responds. Photo cards use captions."""
+    markup = InlineKeyboardMarkup([])
+    try:
+        if photo:
+            await query.edit_message_caption(caption=text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        pass
+
+
+def _muted_footer(minutes: int, failed: str | None = None) -> str:
+    span = {15: "15 minutes", 30: "30 minutes", 60: "1 hour"}.get(minutes, f"{minutes} minutes")
+    body = failed if failed is not None else f"Muted for {span}."
+    return f"<i>{body}</i>"
+
+
+def _with_footer(text: str, footer: str) -> str:
+    if "<i>" in text:
+        text = text[: text.rfind("<i>")].rstrip()
+    return f"{text}\n\n{footer}" if text else footer
+
+
 def _result_text(action: Action, result: dict) -> str:
     if action.type == "alert.silence":
         minutes = int((action.payload or {}).get("minutes") or 60)
-        span = {15: "15 minutes", 30: "30 minutes", 60: "1 hour"}.get(minutes, f"{minutes} minutes")
-        footer = f"Muted for {span}." if result.get("status") == "silenced" else f"Mute failed: {result}"
+        footer = _muted_footer(minutes) if result.get("status") == "silenced" else _muted_footer(minutes, f"Mute failed: {result}")
         card = (action.payload or {}).get("card")
-        return f"{card}\n\n<i>{footer}</i>" if card else footer
+        return _with_footer(card or "", footer)
     if action.type == "xui.upgrade":
         if result.get("status") == "updated":
             return f"3X-UI updated: {result.get('image')}"
@@ -842,7 +917,8 @@ async def lifespan(app: FastAPI):
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     command_ticker = None
     if token:
-        ptb = Application.builder().token(token).updater(None).build()
+        # One slow callback must not delay answering the next button press.
+        ptb = Application.builder().token(token).updater(None).concurrent_updates(True).build()
         for command in COMMANDS:
             ptb.add_handler(CommandHandler(command.name, globals()[command.handler]))
         ptb.add_handler(CallbackQueryHandler(on_callback))
