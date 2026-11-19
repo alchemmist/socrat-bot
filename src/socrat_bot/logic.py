@@ -14,7 +14,6 @@ from socrat_bot.models import (
     Audit,
     Broadcast,
     LinkCode,
-    SudoRequest,
     TelegramCard,
     User,
     UserInterest,
