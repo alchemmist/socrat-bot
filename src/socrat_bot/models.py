@@ -131,6 +131,7 @@ class Audit(Base):
 
 
 class Broadcast(Base):
+    photo_id: Mapped[str | None] = mapped_column(Text)
     audience_group: Mapped[str | None] = mapped_column(String(64).evaluates_none(), nullable=True, default="vpn", server_default="vpn")
     entities: Mapped[list] = mapped_column(JSONType, default=list, server_default="[]")
     __tablename__ = "broadcasts"
@@ -244,6 +245,7 @@ class CardDelivery(Base):
 
 
 class BroadcastCopy(Base):
+    applied_photo_id: Mapped[str | None] = mapped_column(Text)
     applied_entities: Mapped[list] = mapped_column(JSONType, default=list, server_default="[]")
     __tablename__ = "broadcast_copies"
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())

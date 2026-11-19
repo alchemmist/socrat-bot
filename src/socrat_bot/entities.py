@@ -34,13 +34,14 @@ def normalize(text, entities=None):
 
 def command_body(message, tokens=1):
     """Strip command and optional UUID, preserving body whitespace/newlines."""
-    raw = message.text or ""
+    raw = message.text or getattr(message, "caption", None) or ""
     match = re.match(r"\s*\S+" + r"\s+\S+" * (tokens - 1) + r"\s*", raw)
     end = match.end() if match else len(raw)
     body = raw[end:]
     cut = units(raw[:end])
     entities = []
-    for entity in getattr(message, "entities", None) or []:
+    field = "entities" if message.text else "caption_entities"
+    for entity in getattr(message, field, None) or []:
         value = entity.to_dict() if hasattr(entity, "to_dict") else dict(entity)
         start, stop = value["offset"], value["offset"] + value["length"]
         if stop <= cut:

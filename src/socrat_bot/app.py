@@ -383,7 +383,8 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not allowed or message.chat_id != user.id:
         await message.reply_text("This command is available to the owner in private chat only.")
         return
-    raw = (message.text or "").split(maxsplit=1)
+    photo = getattr(message, "photo", None)
+    raw = (message.text or getattr(message, "caption", None) or "").split(maxsplit=1)
     value = raw[1] if len(raw) > 1 else ""
     broadcast_id = None
     if message.reply_to_message:
@@ -393,6 +394,13 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 Broadcast.message_id == message.reply_to_message.message_id,
                 Broadcast.status == "sent",
             ))
+            if broadcast_id is None:
+                from .models import BroadcastCopy
+                broadcast_id = db.scalar(select(Broadcast.id).join(BroadcastCopy).where(
+                    Broadcast.chat_id == user.id, Broadcast.status == "sent",
+                    BroadcastCopy.chat_id == message.chat_id,
+                    BroadcastCopy.message_id == message.reply_to_message.message_id,
+                ))
     body_tokens = 1 if broadcast_id is not None else 2
     if broadcast_id is None and value:
         parts = value.split(maxsplit=1)
@@ -401,7 +409,10 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             value = parts[1] if len(parts) > 1 else ""
         except ValueError:
             pass
-    if broadcast_id is None or not value:
+    if photo and broadcast_id is None:
+        await message.reply_text("Reply to the delivered mailing or its delivery summary, or use /mailing_edit UUID in the photo caption.")
+        return
+    if broadcast_id is None or (not value and not photo):
         from .mailing_list import panel
         text, markup = panel(user.id)
         await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
@@ -412,7 +423,11 @@ async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except ValueError as exc:
         await message.reply_text(str(exc))
         return
-    result = await edit_mailing(broadcast_id, user.id, value, entities)
+    if photo:
+        if not value:
+            value = None  # Keep the current mailing text and its formatting.
+        await message.reply_text("Updating the original mailing messages…")
+    result = await edit_mailing(broadcast_id, user.id, value, entities, **({"photo_id": photo[-1].file_id} if photo else {}))
     await message.reply_text(result[:4096])
 
 
@@ -913,6 +928,7 @@ async def lifespan(app: FastAPI):
         ptb = Application.builder().token(token).updater(None).concurrent_updates(True).build()
         for command in COMMANDS:
             ptb.add_handler(CommandHandler(command.name, globals()[command.handler]))
+        ptb.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/mailing_edit(?:\s|$)"), on_mailing_edit))
         ptb.add_handler(CallbackQueryHandler(on_callback))
         from .mailing_compose import receive_text
         ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text))

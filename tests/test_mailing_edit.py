@@ -401,3 +401,27 @@ def test_native_preview_separate_body(store, application):
     with database.session() as db:
         row = db.scalar(select(Broadcast).where(Broadcast.status == 'group_choosing'))
         assert row.entities[0]['url'] == 'https://example.org/hidden'
+
+
+def test_photo_reply_preserves_caption_and_edits_original_copy(store, application, monkeypatch):
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock, MagicMock
+
+    with database.session() as db:
+        db.get(Broadcast, store).entities = [{'type': 'bold', 'offset': 0, 'length': 3}]
+        db.add(BroadcastCopy(broadcast_id=store, chat_id=1, message_id=17, applied_text='old'))
+    post = AsyncMock(return_value=NS(status_code=200, json=lambda: {'ok': True}))
+    client = MagicMock()
+    client.__aenter__.return_value.post = post
+    monkeypatch.setattr('httpx.AsyncClient', lambda **kwargs: client)
+    msg = NS(chat_id=1, text=None, caption='/mailing_edit', photo=[NS(file_id='photo')],
+             reply_to_message=NS(message_id=17), reply_text=AsyncMock())
+    update = NS(message=msg, effective_user=NS(id=1))
+    asyncio.run(application.app.on_mailing_edit(update, NS()))
+    assert post.await_args.args[0].endswith('/editMessageMedia')
+    payload = post.await_args.kwargs['json']
+    assert payload['message_id'] == 17 and payload['media']['caption'] == 'old'
+    assert payload['media']['caption_entities'][0]['type'] == 'bold'
+    asyncio.run(application.app.on_mailing_edit(update, NS()))
+    assert post.await_count == 1
+    assert 'skipped 1' in msg.reply_text.await_args.args[0]

@@ -17,10 +17,11 @@ def failure(data):
     return description.replace(token, "[redacted]")[:300] if token else description[:300]
 
 
-async def edit_mailing(broadcast_id, owner_id, text, entities=None):
-    from .entities import normalize
+async def edit_mailing(broadcast_id, owner_id, text, entities=None, *, photo_id=None):
+    from .entities import normalize, units
     try:
-        entities = normalize(text, entities)
+        if text is not None or not photo_id:
+            entities = normalize(text, entities)
     except ValueError as exc:
         return str(exc)
     token = str(uuid.uuid4())
@@ -35,7 +36,14 @@ async def edit_mailing(broadcast_id, owner_id, text, entities=None):
             return "Mailing unavailable, not sent, not yours, or another edit is running."
         copies = list(db.scalars(select(BroadcastCopy).where(BroadcastCopy.broadcast_id == broadcast_id)))
         row = db.get(Broadcast, broadcast_id)
+        photo_id = photo_id or row.photo_id
+        if text is None:
+            text, entities = row.text, row.entities or []
+        if photo_id and units(text) > 1024:
+            row.edit_token = row.edit_until = None
+            return "Photo captions are limited to 1024 UTF-16 units. Add a shorter caption after /mailing_edit. No messages were changed."
         if copies:
+            row.photo_id = photo_id
             row.text = text
             row.entities = entities
     updated = skipped = 0
@@ -50,14 +58,21 @@ async def edit_mailing(broadcast_id, owner_id, text, entities=None):
                     ).values(edit_until=datetime.now(UTC) + timedelta(minutes=5))).rowcount
                 if not owned:
                     return "Edit lease lost; retry to reconcile remaining copies."
-                if copy.applied_text == text and (copy.applied_entities or []) == entities:
+                if copy.applied_photo_id == photo_id and copy.applied_text == text and (copy.applied_entities or []) == entities:
                     skipped += 1
                     continue
                 error = None
                 try:
+                    payload = {"chat_id": copy.chat_id, "message_id": copy.message_id}
+                    if photo_id:
+                        method = "editMessageMedia"
+                        payload["media"] = {"type": "photo", "media": photo_id, "caption": text, "caption_entities": entities}
+                    else:
+                        method = "editMessageText"
+                        payload.update(text=text, entities=entities)
                     response = await client.post(
-                        f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/editMessageText",
-                        json={"chat_id": copy.chat_id, "message_id": copy.message_id, "text": text, "entities": entities},
+                        f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/{method}",
+                        json=payload,
                     )
                     data = response.json()
                     if not (response.status_code == 200 and data.get("ok")):
@@ -75,6 +90,7 @@ async def edit_mailing(broadcast_id, owner_id, text, entities=None):
                     stored = db.get(BroadcastCopy, (broadcast_id, copy.chat_id))
                     stored.error = error
                     if error is None:
+                        stored.applied_photo_id = photo_id
                         stored.applied_text = text
                         stored.applied_entities = entities
                 if error:
