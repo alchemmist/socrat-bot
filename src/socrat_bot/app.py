@@ -380,6 +380,11 @@ async def on_mailing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await start(update, context)
 
 
+async def on_resend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from .resend import start
+    await start(update, context)
+
+
 async def on_mailing_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from sqlalchemy import select
     from .mailing import edit_mailing
@@ -609,6 +614,10 @@ async def _approve_alerts(query) -> None:
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
+        return
+    if query.data.startswith("rs:"):
+        from .resend import run_callback
+        await run_callback(query, context.bot)
         return
     from .mailing_compose import group_callback
     if await group_callback(query, context):

@@ -36,7 +36,7 @@ def excerpt(value: str) -> str:
 def editable_mailings(owner_id: int) -> list[tuple]:
     # Receipt time, not UUID order, determines actual delivery chronology. Multiple
     # recipients produce one history entry; edits never change its original timestamp.
-    delivered_at = func.max(BroadcastCopy.sent_at)
+    delivered_at = func.min(BroadcastCopy.sent_at)
     with session() as db:
         return list(db.execute(
             select(Broadcast.id, Broadcast.text, delivered_at, Broadcast.audience_group)

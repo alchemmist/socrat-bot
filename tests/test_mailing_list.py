@@ -114,3 +114,24 @@ def test_long_html_unicode_history_is_bounded_and_paged(history):
     assert units(last) <= PANEL_LIMIT
     assert not any(button.text == "Next ▶" for row in controls.inline_keyboard for button in row)
     assert "&lt;" in last and "&amp;" in last
+
+
+def test_resend_fills_only_each_members_gaps_in_order(history):
+    from socrat_bot.resend import catch_up
+
+    ids = add_history(6)
+    with database.session() as db:
+        for chat in (2, 3):
+            ensure_user(db, chat).set_interest('vpn', True)
+        for identity in ids[1:-1]:
+            db.add(BroadcastCopy(broadcast_id=identity, chat_id=2, message_id=42,
+                                 applied_text=db.get(Broadcast, identity).text))
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)))
+    asyncio.run(catch_up(1, 'vpn', 5, bot))
+    calls = [c.args for c in bot.send_message.await_args_list]
+    assert [body for chat, body in calls if chat == 2] == ['Message 5']
+    assert [body for chat, body in calls if chat == 3] == [f'Message {i}' for i in range(1, 6)]
+    assert len(calls) == 6
+    bot.send_message.reset_mock()
+    asyncio.run(catch_up(1, 'vpn', 5, bot))
+    bot.send_message.assert_not_awaited()

@@ -53,3 +53,14 @@ composition, stale/unauthorized selectors, cancellation/restart, Now deduplicati
 scheduled current-membership resolution, populated old-mailing VPN backfill and
 legacy-worker status isolation. Real Telegram acceptance must target only the
 known owner through a fresh isolated DB and delete only returned test-message IDs.
+
+## Catch up new subscribers
+
+In the owner's private chat, `/resend 5` offers the same three groups. Selecting a
+button starts delivery; no new text is needed. The window is the group's last N
+sent owner mailings with saved receipts, ordered by first receipt. Each current
+eligible member receives only missing copies, oldest first, using the current
+body, formatting and photo. Legacy mailings without receipts are not replayed.
+A timeout or interrupted send leaves a durable reservation: later runs skip it
+rather than risking a duplicate. The summary reports pending/unknown attempts
+separately from Telegram rejections, which can be retried with `/resend`.

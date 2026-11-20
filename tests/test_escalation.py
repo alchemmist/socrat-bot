@@ -1006,7 +1006,7 @@ init_schema()
     with database._engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0023_mailing_photos"
+            == "0024_resend_claims"
         )
     command = [sys.executable, "-m", "alembic"]
     subprocess.run(

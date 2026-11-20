@@ -277,3 +277,10 @@ class ImageDelivery(Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     reply_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ResendClaim(Base):
+    """Committed before Telegram I/O; an ambiguous send must not be retried blindly."""
+    __tablename__ = "resend_claims"
+    broadcast_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)

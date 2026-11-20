@@ -32,6 +32,7 @@ COMMANDS = (
     Command("users", "List users by interest", "on_users", owner_only=True),
     Command("alertlevel", "Assign an admin level: /alertlevel TELEGRAM_ID LEVEL", "on_alertlevel", owner_only=True),
     Command("mailing", "Choose a group, write and schedule a mailing", "on_mailing", owner_only=True),
+    Command("resend", "Send missed mailings: /resend N", "on_resend", owner_only=True),
     Command("mailing_edit", "Edit a sent mailing: /mailing_edit UUID TEXT", "on_mailing_edit", owner_only=True),
 )
 # Language-independent fallback plus languages used by this bot's users. Descriptions
