@@ -15,6 +15,9 @@ from .mailing_compose import GROUPS, group_label
 from .models import Broadcast, BroadcastCopy, ResendClaim
 
 
+from .telegram_reply import reply_text
+
+
 def allowed(user, chat):
     with session() as db:
         return user == chat and is_owner(db, user)
@@ -23,16 +26,33 @@ def allowed(user, chat):
 async def start(update, context):
     message = update.message
     if not allowed(update.effective_user.id, message.chat_id):
-        await message.reply_text("Owner private chat only.")
-        return
-    if len(context.args) != 1 or not re.fullmatch(r"[1-9][0-9]{0,8}", context.args[0]):
-        await message.reply_text(
-            "Usage: /resend N (positive number of recent mailings, e.g. /resend 5)."
+        await reply_text(
+            message, "Команда доступна только владельцу бота в личном чате."
         )
         return
-    n = context.args[0]
-    await message.reply_text(
-        f"Send missing copies of the latest {n} tracked mailings. Choose the group to start:",
+    args = context.args or []
+    if not args:
+        problem = "Не указано, сколько последних рассылок проверить."
+    elif len(args) != 1:
+        problem = (
+            "После /resend нужно указать только одно число. Группу ты выберешь кнопкой."
+        )
+    elif not re.fullmatch(r"[1-9][0-9]{0,8}", args[0]):
+        problem = "Количество рассылок нужно записать целым числом от 1 до 999999999 без ведущих нулей."
+    else:
+        problem = None
+    if problem:
+        await reply_text(
+            message,
+            f"{problem}\n\nНапример, отправь /resend 5 и выбери группу. "
+            "Бот проверит последние пять рассылок этой группы и дошлёт каждому только пропущенные. "
+            "Сейчас ничего не отправлено.",
+        )
+        return
+    n = args[0]
+    await reply_text(
+        message,
+        f"Сколько последних рассылок проверить: {n}. Выбери группу, чтобы начать досылку пропущенных сообщений.",
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton(group_label(g), callback_data=f"rs:{n}:{g}")]

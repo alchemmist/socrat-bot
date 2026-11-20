@@ -12,7 +12,9 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest
+
+from socrat_bot.telegram_reply import reply_text
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -202,22 +204,12 @@ def card_from_request(body: OutMessage) -> Card | None:
     return Card(key=raw.key[:120], title=raw.title, where=raw.where, summary=raw.summary, status=status, links=links)
 
 
-async def _reply_start(message, text, **kwargs):
-    # Only connection setup is safe to retry: a read timeout may mean delivered.
-    try:
-        return await message.reply_text(text, connect_timeout=15, **kwargs)
-    except TimedOut as exc:
-        if not isinstance(exc.__cause__, httpx.ConnectTimeout):
-            raise
-    return await message.reply_text(text, connect_timeout=15, **kwargs)
-
-
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
         return
     if update.effective_chat.id != user.id:
-        await _reply_start(update.message, "Open /start in private chat to choose your interests.")
+        await reply_text(update.message, "Open /start in private chat to choose your interests.")
         return
     arg = context.args[0] if context.args else ""
     with session() as db:
@@ -232,10 +224,10 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             text = _start_text(interests, approved)
     if arg.startswith("link_"):
-        await _reply_start(update.message, text)
+        await reply_text(update.message, text)
         return
     keyboard = _start_keyboard(interests, approved)
-    await _reply_start(update.message, text, reply_markup=keyboard)
+    await reply_text(update.message, text, reply_markup=keyboard)
     if owner and not await sync_owner_menu(context.bot, user.id):
         log.info("telegram commands failed")
 
