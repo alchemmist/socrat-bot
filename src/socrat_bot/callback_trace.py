@@ -10,7 +10,7 @@ log = logging.getLogger("socrat-bot")
 
 def start(payload):
     query = payload.get("callback_query") if isinstance(payload, dict) else None
-    if isinstance(query, dict) and str(query.get("data", "")).startswith("act:"):
+    if isinstance(query, dict) and str(query.get("data", "")).startswith(("act:", "esc:")):
         token = operation.set(uuid.uuid4().hex)
         stage("received")
         return token

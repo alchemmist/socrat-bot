@@ -100,3 +100,47 @@ def test_preflight_error_reports_failure_without_dispatch(monkeypatch):
     query.answer.assert_awaited_once_with(
         "Не удалось проверить действие. Попробуйте позже."
     )
+
+
+def test_escalation_delivers_committed_pressed_copy_while_answer_is_in_flight(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+    from threading import get_ident
+
+    main_thread = get_ident()
+    committed = []
+
+    @contextmanager
+    def session():
+        assert get_ident() != main_thread
+        yield object()
+        committed.append(True)
+
+    def escalate(db, *args, pressed_jobs):
+        pressed_jobs.append("pressed")
+        return "Escalated"
+
+    async def run():
+        delivered = asyncio.Event()
+
+        async def dispatch(jobs):
+            assert committed and jobs == ["pressed"]
+            delivered.set()
+
+        async def answer(result):
+            assert result == "Escalated"
+            await asyncio.wait_for(delivered.wait(), 1)
+
+        monkeypatch.setattr(app, "dispatch_jobs", dispatch)
+        q = SimpleNamespace(
+            data="esc:digest:1:20",
+            from_user=SimpleNamespace(id=1),
+            message=SimpleNamespace(chat_id=1, message_id=2),
+            answer=answer,
+        )
+        await app.on_callback(SimpleNamespace(callback_query=q), None)
+
+    monkeypatch.setattr(app, "session", session)
+    monkeypatch.setattr(app, "escalate", escalate)
+    asyncio.run(run())

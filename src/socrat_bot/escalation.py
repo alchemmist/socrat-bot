@@ -210,17 +210,23 @@ def escalate(
     digest: str,
     generation: int,
     expected: int,
+    *, pressed_jobs=None,
 ) -> str:
     user = db.scalar(select(User).where(User.telegram_id == actor))
     if actor != chat_id or not user or not user.alerts_active:
         return "Not authorized"
-    # The callback digest is compact enough for Telegram's 64-byte limit.
-    incident = next(
-        (i for i in db.scalars(select(Incident)) if token(i.key) == digest), None
-    )
-    if not incident:
+    # Resolve the pressed copy, not the entire incident history. Reject ambiguous
+    # message mappings rather than modifying an unrelated incident.
+    cards = list(db.scalars(select(TelegramCard).where(
+        TelegramCard.chat_id == chat_id, TelegramCard.message_id == message_id,
+        TelegramCard.generation == generation,
+    ).limit(2)))
+    if len(cards) != 1 or token(cards[0].key) != digest:
         return "Stale incident"
-    card = db.get(TelegramCard, (incident.key, chat_id))
+    card = cards[0]
+    incident = db.get(Incident, card.key)
+    if incident is None:
+        return "Stale incident"
     if (
         not card
         or card.message_id != message_id
@@ -314,7 +320,9 @@ def escalate(
                 cloned.append({**spec, "callback_data": f"act:{action.id}"})
             state.buttons = cloned
 
-        enqueue_card(db, incident, user.telegram_id, source=template.chat_id)
+        job = enqueue_card(db, incident, user.telegram_id, source=template.chat_id)
+        if pressed_jobs is not None and user.telegram_id == actor:
+            pressed_jobs.append(job)
         if existing and user.admin_level == destination and user.telegram_id != actor:
             db.add(
                 AlertOutbox(
