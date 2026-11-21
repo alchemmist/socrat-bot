@@ -104,6 +104,7 @@ def annotate_card(
     replacement=None,
     chat_id=None,
     expected_generation=None,
+    preferred_chat=None,
 ):
     """Desired-state mutation commits before HTTP and cannot lose a concurrent writer."""
     with session() as db:
@@ -143,6 +144,9 @@ def annotate_card(
             raise LookupError("card not found")
         if not any(s.text for s in states):
             raise ValueError("card text is not stored yet")
+        # Locks above retain canonical ordering. Prioritize only after acquisition.
+        if preferred_chat is not None:
+            states.sort(key=lambda state: state.chat_id != preferred_chat)
         jobs = []
         for state in states:
             if chat_id is not None and state.chat_id != chat_id:
@@ -192,7 +196,7 @@ def annotate_card(
 async def dispatch_jobs(jobs, *, wait_seconds=25):
     """Synchronous API compatibility; background recovery owns any unfinished work."""
     deadline = time.monotonic() + wait_seconds
-    remaining = set(jobs)
+    remaining = dict.fromkeys(jobs)  # preserve priority while deduplicating
     while remaining:
         progress = False
         for id_ in list(remaining):
@@ -201,12 +205,12 @@ async def dispatch_jobs(jobs, *, wait_seconds=25):
                 progress = True
                 if not await _deliver_work(work):
                     # Do not obscure errors or spin on ambiguous Telegram timeouts.
-                    remaining.discard(id_)
+                    remaining.pop(id_, None)
                     continue
             with session() as db:
                 row = db.get(AlertOutbox, id_)
                 if row.done:
-                    remaining.discard(id_)
+                    remaining.pop(id_, None)
         if remaining and not progress:
             if time.monotonic() >= deadline:
                 return

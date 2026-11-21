@@ -14,6 +14,10 @@ PEERS = tuple(
 )
 
 
+def mute_minutes(payload):
+    return max(1, min(int((payload or {}).get("minutes") or 60), 1440))
+
+
 def signature(matchers):
     return sorted(
         (m["name"], m["value"], m.get("isRegex", False), m.get("isEqual", True))
@@ -36,7 +40,7 @@ async def execute(action, previous):
         ]
     if not matchers:
         return failure("invalid_matchers")
-    minutes = max(1, min(int(payload.get("minutes") or 60), 1440))
+    minutes = mute_minutes(payload)
     legacy = f"muted for {minutes} minutes from Telegram"
     marker = f"{legacy}; action={action.id}"
     timeout = httpx.Timeout(8, connect=3)
