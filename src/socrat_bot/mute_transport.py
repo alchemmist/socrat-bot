@@ -72,21 +72,27 @@ async def execute(action, previous):
                     for n, value in enumerate(responses)
                     if isinstance(value, Exception)
                 }
+                for value in responses:
+                    if isinstance(value, asyncio.CancelledError):
+                        raise value
+                matches = [
+                    x for rows in responses if isinstance(rows, list) for x in rows
+                ]
+                for x in matches:
+                    if x["comment"] == marker:
+                        return {
+                            "status": "silenced",
+                            "silence": {"silenceID": x["id"]},
+                            "reconciled": True,
+                        }
                 if not errors:
-                    copies = responses
                     break
                 if attempt == 2:
                     return {**unknown, "read_errors": errors}
-                await asyncio.sleep(0.5)  # GET only; do not replay a possible write
+                await asyncio.sleep(
+                    0.5
+                )  # GET only; never infer absence from partial results
 
-            matches = [x for rows in copies for x in rows]
-            for x in matches:
-                if x["comment"] == marker:
-                    return {
-                        "status": "silenced",
-                        "silence": {"silenceID": x["id"]},
-                        "reconciled": True,
-                    }
             if matches:
                 # Legacy comments were shared. Do not claim another action's receipt.
                 return failure("legacy_overlap")

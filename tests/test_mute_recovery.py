@@ -127,3 +127,26 @@ def test_final_pre_send_failures_expose_safe_per_route_timing():
         "service",
     ]
     assert "private fixture" not in str(result)
+
+
+def test_one_verified_receipt_suffices_but_no_new_write_on_partial_readback():
+    def handler(req):
+        assert req.method == "GET"
+        if req.url.host.startswith(
+            "alertmanager-kube-prometheus-stack-alertmanager-0."
+        ):
+            raise httpx.ConnectTimeout("fixture")
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "createdBy": "socrat-bot",
+                    "comment": "muted for 15 minutes from Telegram; action=fixture",
+                    "matchers": MATCH,
+                    "status": {"state": "active"},
+                    "id": "existing",
+                }
+            ],
+        )
+
+    assert run(handler, {"status": "failed"})["silence"] == {"silenceID": "existing"}

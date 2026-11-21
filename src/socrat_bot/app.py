@@ -794,6 +794,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
     with session() as db:
         action = db.get(Action, action_id)
+        if action is None:
+            return  # deleted after the initial authorization; never edit an unverified card
         result = mute_result if is_mute else await apply_action(db, action, actor)
         if preview and action.type == "alert.silence" and result.get("status") != "silenced":
             failure = _with_footer(preview_base, _muted_footer(preview_minutes, _mute_failure(result)))
