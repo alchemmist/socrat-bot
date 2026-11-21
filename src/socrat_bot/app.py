@@ -22,11 +22,10 @@ from socrat_bot import callback_trace, media
 from socrat_bot.cards import (
     Card,
     Link,
-    add_link,
-    add_note,
     build_alert,
     select_links,
 )
+from socrat_bot.cards import add_link as add_link
 from socrat_bot.cards import replace_spi_link as replace_spi_link
 from socrat_bot.commands import COMMANDS, command_menu_loop, sync_owner_menu
 from socrat_bot.db import init_schema, session
@@ -38,7 +37,7 @@ from socrat_bot.delivery import (
     spi_acknowledgements,
     submit_card,
 )
-from socrat_bot.escalation import escalate, marker, outbox_loop
+from socrat_bot.escalation import escalate, outbox_loop
 from socrat_bot.grafana_rules import start_rule_refresh
 from socrat_bot.logic import (
     alert_levels,
@@ -46,7 +45,6 @@ from socrat_bot.logic import (
     approve_alerts,
     audience,
     broadcast_zone,
-    card_messages,
     claim_due_broadcasts,
     consume_link,
     create_action,
@@ -122,22 +120,6 @@ class BroadcastIn(BaseModel):
     text: str
     chat_id: int
 
-
-
-def _saved_spi(key: str) -> tuple[str, str]:
-    with session() as db:
-        rows=db.scalars(select(TelegramCard).where(TelegramCard.key == key)).all()
-        desired=max(rows,key=lambda r:r.desired_link_revision or 0,default=None)
-        if desired is not None and desired.desired_spi_url:
-            return desired.desired_spi_url,"SPI"
-        row=next((r for r in rows if r.spi_url),None)
-        return (row.spi_url,row.spi_label or "SPI")if row else ("","")
-
-
-def _saved_note(key: str) -> str:
-    with session() as db:
-        row = db.scalar(select(TelegramCard).where(TelegramCard.key == key, TelegramCard.note.is_not(None)))
-        return row.note or "" if row is not None else ""
 
 
 def schedule_action_event(event: dict) -> None:
@@ -855,27 +837,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "key": key,
                 "minutes": int((action.payload or {}).get("minutes") or 0),
             })
-            if key:
-                copies = card_messages(db, key) or copies
-                spi_url, spi_label = _saved_spi(key)
-                if spi_url:
-                    text = add_link(text, spi_url, spi_label)
-                note = _saved_note(key)
-                if note:
-                    text = add_note(text, note)
-                incident = db.get(Incident, key)
-                if incident:
-                    text = marker(text, incident)
         else:
             key = ""
     if failure:
         await _show_muted_message(query, failure, preview_photo, getattr(query.message, "reply_markup", None))
         return
     if key and text:
-        footer = text[text.rfind("<i>"):] if "<i>" in text else "<i>Muted</i>"
+        footer = _muted_footer(int((action.payload or {}).get("minutes") or 60))
         try:
             _recipients, jobs = await asyncio.to_thread(
-                annotate_card, key, mute=footer, expected_generation=mute_generation
+                annotate_card, key, mute=footer, expected_generation=mute_generation,
+                preferred_chat=action.chat_id
             )
         except ValueError:
             # A silence request may finish after this incident has resolved/refired.
