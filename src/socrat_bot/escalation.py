@@ -111,6 +111,14 @@ def delivery_state(db, key, chat_id, generation):
 
 def enqueue_card(db, incident, chat_id, text=None, source=None):
     state = delivery_state(db, incident.key, chat_id, incident.generation)
+    job = enqueue_locked_card(db, incident, state, text=text, source=source)
+    db.flush()
+    return job
+
+
+def enqueue_locked_card(db, incident, state, *, text=None, source=None):
+    """Stage one outbox job using a delivery row already locked by this session."""
+    chat_id = state.chat_id
     if state.generation != incident.generation:
         state.generation = incident.generation
         state.text = None
@@ -119,6 +127,7 @@ def enqueue_card(db, incident, chat_id, text=None, source=None):
         state.text = text
     state.revision += 1
     row = AlertOutbox(
+        id=uuid.uuid4(),
         payload={
             "key": incident.key,
             "generation": incident.generation,
@@ -129,7 +138,6 @@ def enqueue_card(db, incident, chat_id, text=None, source=None):
         }
     )
     db.add(row)
-    db.flush()
     return row.id
 
 
