@@ -603,6 +603,60 @@ async def _approve_alerts(query) -> None:
         pass
 
 
+def _prepare_callback(action_id, actor_id, username):
+    """Use a worker-owned DB session; never stall the webhook loop on row locks."""
+    from sqlalchemy import update as sql_update
+    legacy = None
+    with session() as db:
+        candidate = db.get(Action, action_id)
+        if candidate and candidate.type == "broadcast.send":
+            if not is_owner(db, actor_id):
+                return ("blocked", None)
+            if candidate.status != "pending" or (candidate.expires_at and as_utc(candidate.expires_at) < datetime.now(timezone.utc)):
+                return ("blocked", None)
+            claimed = db.execute(sql_update(Action).where(Action.id == action_id, Action.status == "pending").values(status="running")).rowcount
+            if not claimed:
+                return ("blocked", None)
+            row = db.get(Broadcast, uuid.UUID(candidate.payload["broadcast_id"]))
+            if row is None or row.status != "preview":
+                candidate.status = "failed"
+                return ("blocked", None)
+            row.status = "sending"
+            legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
+    if legacy:
+        return ("broadcast", legacy)
+    mute_generation = None
+    preview = None
+    preview_base = ""
+    preview_minutes = 60
+    preview_photo = False
+    is_mute = False
+    rejected = None
+    with session() as db:
+        action = db.get(Action, action_id)
+        if action is None:
+            rejected = ("missing", "Кнопка больше недоступна.")
+        else:
+            person = ensure_user(db, actor_id, username)
+            is_mute = action.type == "alert.silence"
+            if not (person.role == "owner" or (is_mute and person.alerts_active)):
+                rejected = ("denied", "Недостаточно прав для этого действия.")
+            elif is_mute and action.payload.get("key"):
+                incident = db.get(Incident, action.payload["key"])
+                copy = db.get(TelegramCard, (action.payload["key"], action.chat_id))
+                if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
+                    rejected = ("stale", "Алерт закрыт или карточка устарела.")
+                elif incident:
+                    mute_generation = incident.generation
+                    preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
+                    preview_minutes = int((action.payload or {}).get("minutes") or 60)
+                    preview_photo = getattr(copy, "message_kind", None) == "photo"
+                    preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
+    if rejected:
+        return ("rejected", rejected)
+    return ("ready", (preview, preview_base, preview_minutes, preview_photo, is_mute, mute_generation))
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
@@ -729,27 +783,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         callback_trace.stage("invalid")
         await acknowledge("Кнопка недействительна.")
         return
-    from sqlalchemy import update as sql_update
-    legacy = None
-    with session() as db:
-        candidate = db.get(Action, action_id)
-        if candidate and candidate.type == "broadcast.send":
-            if not is_owner(db, query.from_user.id):
-                return
-            if candidate.status != "pending" or (candidate.expires_at and as_utc(candidate.expires_at) < datetime.now(timezone.utc)):
-                return
-            claimed = db.execute(sql_update(Action).where(Action.id == action_id, Action.status == "pending").values(status="running")).rowcount
-            if not claimed:
-                return
-            row = db.get(Broadcast, uuid.UUID(candidate.payload["broadcast_id"]))
-            if row is None or row.status != "preview":
-                candidate.status = "failed"
-                return
-            row.status = "sending"
-            legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
-    if legacy:
-        await acknowledge("Запрос принят.")
-        broadcast_id, body, recipients = legacy
+    preparation = asyncio.create_task(asyncio.to_thread(_prepare_callback, action_id, query.from_user.id, query.from_user.username))
+    done, _ = await asyncio.wait({preparation}, timeout=0.75)
+    acknowledged = not done
+    if acknowledged:
+        await acknowledge("Запрос принят. Проверяю…")
+    kind, data = await preparation
+    if kind in ("blocked", "rejected"):
+        reason, message = data or ("denied", "Действие недоступно.")
+        callback_trace.stage(reason)
+        if not acknowledged:
+            await acknowledge(message)
+        return
+    if not acknowledged:
+        await acknowledge("Запрос принят. Проверяю…")
+    if kind == "broadcast":
+        broadcast_id, body, recipients = data
         result = await deliver_broadcast(body, recipients, broadcast_id)
         with session() as db:
             row = db.get(Broadcast, broadcast_id)
@@ -758,37 +807,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             action.status, action.result = "done", result
         await query.edit_message_text(_delivery_notice("Broadcast", result) + f"\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT")
         return
-    preview = None
-    preview_base = ""
-    preview_minutes = 60
-    preview_photo = False
-    is_mute = False
-    rejected = None
-    with session() as db:
-        action = db.get(Action, action_id)
-        if action is None:
-            rejected = ("missing", "Кнопка больше недоступна.")
-        else:
-            person = ensure_user(db, query.from_user.id, query.from_user.username)
-            is_mute = action.type == "alert.silence"
-            if not (person.role == "owner" or (is_mute and person.alerts_active)):
-                rejected = ("denied", "Недостаточно прав для этого действия.")
-            elif is_mute and action.payload.get("key"):
-                incident = db.get(Incident, action.payload["key"])
-                copy = db.get(TelegramCard, (action.payload["key"], action.chat_id))
-                if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
-                    rejected = ("stale", "Алерт закрыт или карточка устарела.")
-                elif incident:
-                    mute_generation = incident.generation
-                    preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
-                    preview_minutes = int((action.payload or {}).get("minutes") or 60)
-                    preview_photo = getattr(copy, "message_kind", None) == "photo"
-                    preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
-    if rejected:
-        callback_trace.stage(rejected[0])
-        await acknowledge(rejected[1])
-        return
-    await acknowledge("Запрос принят. Проверяю…")
+    preview, preview_base, preview_minutes, preview_photo, is_mute, mute_generation = data
     # The Telegram preview used to block the Alertmanager request. Run the mute
     # with its own transaction and event loop: unrelated synchronous DB work in
     # other callbacks must not consume this client's transport timeout budget.
@@ -807,6 +826,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         mute_result = await asyncio.to_thread(run_mute)
         callback_trace.stage("silenced" if mute_result.get("status") == "silenced" else "not_silenced")
         if mute_result.get("status") == "stale":
+            callback_trace.stage("stale")
             return
     with session() as db:
         action = db.get(Action, action_id)
