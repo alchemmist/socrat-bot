@@ -17,8 +17,17 @@ def start(payload):
     return None
 
 
-def stage(value):
+def stage(value, *, exception=None):
     if operation.get():
         log.info(
-            "action callback", extra={"operation": operation.get(), "stage": value}
+            "action callback",
+            extra={
+                "operation": operation.get(),
+                "stage": value,
+                **(
+                    {"failure_kind": type(exception).__name__}
+                    if exception is not None
+                    else {}
+                ),
+            },
         )

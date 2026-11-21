@@ -53,6 +53,9 @@ class JsonFormatter(logging.Formatter):
         if message == "action callback":
             operation = getattr(record, "operation", None)
             stage = getattr(record, "stage", None)
+            failure = getattr(record, "failure_kind", None)
+            if failure is not None:
+                data["failure_kind"] = failure if failure in ("TimeoutError", "OperationalError", "IntegrityError", "ValueError", "TypeError", "KeyError", "BadRequest", "TimedOut", "NetworkError") else "other"
             if isinstance(operation, str) and re.fullmatch(r"[0-9a-f]{32}", operation):
                 data["operation"] = operation
             if stage in ("received", "handler", "acknowledged", "ack_unconfirmed", "invalid", "missing", "denied", "stale", "dispatch", "silenced", "not_silenced", "handler_error", "preflight_error", "decode_or_dispatch_error"):

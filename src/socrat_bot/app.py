@@ -790,8 +790,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await acknowledge("Запрос принят. Проверяю…")
     try:
         kind, data = await preparation
-    except Exception:
-        callback_trace.stage("preflight_error")
+    except Exception as exc:
+        callback_trace.stage("preflight_error", exception=exc)
         if not acknowledged:
             await acknowledge("Не удалось проверить действие. Попробуйте позже.")
         return
@@ -1068,7 +1068,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 
 async def _ptb_error(update, context):
     # process_update dispatches exceptions to error handlers, not its caller.
-    callback_trace.stage("handler_error")
+    callback_trace.stage("handler_error", exception=context.error)
     log.error("telegram update failed")
 
 
