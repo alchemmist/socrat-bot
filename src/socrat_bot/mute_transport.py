@@ -66,13 +66,17 @@ async def execute(action, previous):
                 copies = await asyncio.gather(*(read(p) for p in peers))
             except (httpx.HTTPError, KeyError, ValueError, TypeError):
                 return unknown
-            for rows in copies:
-                if rows:
+            matches = [x for rows in copies for x in rows]
+            for x in matches:
+                if x["comment"] == marker:
                     return {
                         "status": "silenced",
-                        "silence": {"silenceID": rows[0]["id"]},
+                        "silence": {"silenceID": x["id"]},
                         "reconciled": True,
                     }
+            if matches:
+                # Legacy comments were shared. Do not claim another action's receipt.
+                return failure("legacy_overlap")
             # Only an explicit new button press reaches here. Both peers saw no silence.
             stamp = previous.get("attempted_at")
             if stamp and datetime.now(timezone.utc).timestamp() - stamp < 30:

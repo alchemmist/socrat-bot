@@ -75,3 +75,25 @@ def test_missing_peer_never_reposts_ambiguous_request():
         raise httpx.ConnectError("no peer")
 
     assert run(handler, {"status": "failed", "error": ""})["reason"] == "unconfirmed"
+
+
+def test_shared_legacy_comment_is_not_an_action_receipt():
+    def handler(req):
+        assert req.method == "GET"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "createdBy": "socrat-bot",
+                    "comment": "muted for 15 minutes from Telegram",
+                    "matchers": MATCH,
+                    "status": {"state": "active"},
+                    "id": "different",
+                }
+            ],
+        )
+
+    assert run(handler, {"status": "failed", "error": ""}) == {
+        "status": "failed",
+        "reason": "legacy_overlap",
+    }
