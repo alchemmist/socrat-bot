@@ -220,3 +220,13 @@ def test_audience_and_open_cards():
         assert get_card(db, "Disk/pod/ns/a")["status"] == "firing"
         assert get_card(db, "missing") is None
         assert list_cards(db, "all").__len__() == 2
+
+
+def test_lookup_by_episode_only_loads_matching_cards():
+    episode = "a" * 64
+    key = "Disk/spi/" + episode
+    with session() as db:
+        open_card(db, key, 1, True)
+        open_card(db, "Other/spi/" + "b" * 64, 1, True)
+        assert [c["key"] for c in list_cards(db, "all", episode)] == [key]
+        assert list_cards(db, "all", "c" * 64) == []

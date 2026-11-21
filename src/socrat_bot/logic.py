@@ -292,8 +292,11 @@ def get_card(db: Session, key: str) -> dict | None:
     return card_view(key, rows, db.get(Incident, key))
 
 
-def list_cards(db: Session, status: str = "firing") -> list[dict]:
-    rows = list(db.scalars(select(TelegramCard).order_by(TelegramCard.key, TelegramCard.chat_id)))
+def list_cards(db: Session, status: str = "firing", episode: str | None = None) -> list[dict]:
+    query = select(TelegramCard)
+    if episode is not None:
+        query = query.where(TelegramCard.key.endswith("/spi/" + episode, autoescape=True))
+    rows = db.scalars(query.order_by(TelegramCard.key, TelegramCard.chat_id))
     grouped: dict[str, list[TelegramCard]] = {}
     for row in rows:
         grouped.setdefault(row.key, []).append(row)

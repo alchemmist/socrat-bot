@@ -1107,13 +1107,13 @@ def get_cards(status: str = "firing", episode: str | None = None, x_internal_tok
     require_internal(x_internal_token)
     if status not in {"firing", "resolved", "all"}:
         raise HTTPException(status_code=400, detail="status must be firing, resolved or all")
-    with session() as db:
-        cards=list_cards(db, status)
     if episode is not None:
         import re
         if not re.fullmatch(r"[a-f0-9]{64}",episode):
             raise HTTPException(status_code=400,detail="invalid episode")
-        cards=[c for c in cards if c["key"].endswith("/spi/"+episode)]
+    with session() as db:
+        cards=list_cards(db, status, episode)
+    if episode is not None:
         for c in cards:
             c.update(episode=episode, immutable_key=True)
     return {"cards":cards}
