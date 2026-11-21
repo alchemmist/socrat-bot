@@ -351,7 +351,13 @@ def format_vpn_clients(users: list[User]) -> str:
 
 
 async def apply_action(db: Session, action: Action, actor: str) -> dict:
-    if action.status != "pending":
+    if action.type == "alert.silence":
+        # Concurrent callbacks must not both POST. Do not block the event loop
+        # waiting for a transaction that is itself awaiting Alertmanager I/O.
+        action = db.scalar(select(Action).where(Action.id == action.id).with_for_update(skip_locked=True).execution_options(populate_existing=True))
+        if action is None:
+            return {"status":"running"}
+    if action.status != "pending" and not (action.type == "alert.silence" and action.status == "failed"):
         stored = dict(action.result or {})
         stored["replayed"] = True
         stored.setdefault("status", action.status)
@@ -366,10 +372,11 @@ async def apply_action(db: Session, action: Action, actor: str) -> dict:
         result = await _dispatch(db, action)
     except Exception as exc:
         action.status = "failed"
-        action.result = {"status": "failed", "error": str(exc)}
+        action.result = ({"status": "failed", "reason": "unconfirmed", "stage": type(exc).__name__, "attempted_at": datetime.now(timezone.utc).timestamp()}
+                         if action.type == "alert.silence" else {"status": "failed", "error": str(exc)})
         audit(db, actor, action.type, action.result)
         return action.result
-    action.status = "done"
+    action.status = "failed" if result.get("status") == "failed" else "done"
     action.result = result
     audit(db, actor, action.type, result)
     return result
@@ -377,7 +384,8 @@ async def apply_action(db: Session, action: Action, actor: str) -> dict:
 
 async def _dispatch(db: Session, action: Action) -> dict:
     if action.type == "alert.silence":
-        return await _silence(action.payload)
+        from socrat_bot.mute_transport import execute
+        return await execute(action, action.result)
     if action.type == "broadcast.send":
         row = db.get(Broadcast, uuid.UUID(action.payload["broadcast_id"]))
         if row is None or row.status not in {"preview", "draft"}:
@@ -396,24 +404,6 @@ async def _dispatch(db: Session, action: Action) -> dict:
             row.status = "cancelled"
         return {"status": "cancelled"}
     raise ValueError(f"unknown action {action.type}")
-
-
-async def _silence(payload: dict) -> dict:
-    base = os.environ.get("ALERTMANAGER_URL", "http://kube-prometheus-stack-alertmanager.cattle-monitoring-system.svc:9093")
-    minutes = int(payload.get("minutes") or 60)
-    minutes = max(1, min(minutes, 24 * 60))
-    ends = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
-    body = {
-        "matchers": payload.get("matchers") or [{"name": "alertname", "value": payload.get("alertname", ".*"), "isRegex": True}],
-        "startsAt": datetime.now(timezone.utc).isoformat(),
-        "endsAt": ends,
-        "createdBy": "socrat-bot",
-        "comment": f"muted for {minutes} minutes from Telegram",
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.post(f"{base}/api/v2/silences", json=body)
-        response.raise_for_status()
-        return {"status": "silenced", "silence": response.json()}
 
 
 async def deliver_broadcast(text: str, recipients: list[int], broadcast_id=None) -> dict:

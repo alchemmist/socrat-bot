@@ -772,14 +772,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
                 preview_minutes = int((action.payload or {}).get("minutes") or 60)
                 preview_photo = getattr(copy, "message_kind", None) == "photo"
-                preview = _with_footer(preview_base, _muted_footer(preview_minutes))
+                preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
     if preview:
-        await _show_muted_message(query, preview, preview_photo)
+        await _show_muted_message(query, preview, preview_photo, getattr(query.message, "reply_markup", None))
     with session() as db:
         action = db.get(Action, action_id)
         result = await apply_action(db, action, actor)
         if preview and action.type == "alert.silence" and result.get("status") != "silenced":
-            failure = _with_footer(preview_base, _muted_footer(preview_minutes, f"Mute failed: {result}"))
+            failure = _with_footer(preview_base, _muted_footer(preview_minutes, _mute_failure(result)))
         else:
             failure = None
         text = _result_text(action, result)
@@ -808,7 +808,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             key = ""
     if failure:
-        await _show_muted_message(query, failure, preview_photo)
+        await _show_muted_message(query, failure, preview_photo, getattr(query.message, "reply_markup", None))
+        return
     if key and text:
         footer = text[text.rfind("<i>"):] if "<i>" in text else "<i>Muted</i>"
         try:
@@ -855,9 +856,17 @@ async def _broadcast_loop() -> None:
             log.error("broadcast loop failed")
 
 
-async def _show_muted_message(query, text: str, photo: bool) -> None:
+def _mute_failure(result: dict) -> str:
+    if result.get("status") == "running": return "Mute request in progress."
+    if result.get("status") == "expired": return "This mute button has expired."
+    if result.get("reason") == "not_connected": return "Alertmanager could not be reached. Tap Mute to retry."
+    if result.get("reason") == "legacy_overlap": return "A matching silence already exists; no additional mute was created."
+    if result.get("reason") == "invalid_matchers": return "Mute rejected: missing alert matchers."
+    return "Mute not confirmed. Tap Mute to check Alertmanager again."
+
+
+async def _show_muted_message(query, text: str, photo: bool, markup=None) -> None:
     """Update the pressed card before Alertmanager responds. Photo cards use captions."""
-    markup = InlineKeyboardMarkup([])
     try:
         if photo:
             await query.edit_message_caption(caption=text, parse_mode="HTML", reply_markup=markup)
@@ -882,7 +891,7 @@ def _with_footer(text: str, footer: str) -> str:
 def _result_text(action: Action, result: dict) -> str:
     if action.type == "alert.silence":
         minutes = int((action.payload or {}).get("minutes") or 60)
-        footer = _muted_footer(minutes) if result.get("status") == "silenced" else _muted_footer(minutes, f"Mute failed: {result}")
+        footer = _muted_footer(minutes) if result.get("status") == "silenced" else _muted_footer(minutes, _mute_failure(result))
         card = (action.payload or {}).get("card")
         return _with_footer(card or "", footer)
     if action.type == "broadcast.send":
