@@ -10,5 +10,5 @@ class Interest:
     approval_required: bool = False
 
 
-INTERESTS = (Interest("vpn", "VPN"), Interest("alerts", "Alerts", True), Interest("llm", "LLM"))
+INTERESTS = (Interest("vpn", "VPN"), Interest("alerts", "Alerts", True), Interest("llm", "LLM"), Interest("cluster", "Cluster"))
 BY_KEY = {item.key: item for item in INTERESTS}

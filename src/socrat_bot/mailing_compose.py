@@ -14,7 +14,7 @@ from .interests import BY_KEY
 from .logic import broadcast_zone, ensure_user
 from .models import Broadcast
 
-GROUPS = ("vpn", "alerts", "llm")
+GROUPS = tuple(BY_KEY)
 COMPOSING = ("selecting_group", "awaiting_text")
 
 

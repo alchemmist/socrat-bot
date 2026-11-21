@@ -71,7 +71,8 @@ def seed_groups():
             user.alerts_approved = identity in (4, 6)
 
 
-def test_llm_interest_and_disjoint_audiences(interests_store):
+@pytest.mark.parametrize("topic", ["llm", "cluster"])
+def test_interest_and_disjoint_audiences(interests_store, topic):
     seed_groups()
     with database.session() as db:
         assert [u.telegram_id for u in mailing_audience(db, "vpn")] == [2, 6]
@@ -83,14 +84,17 @@ def test_llm_interest_and_disjoint_audiences(interests_store):
             mailing_audience(db, "typo")
     from test_interests import click, query
 
-    click(query("interest:llm:on"))
+    click(query(f"interest:{topic}:on"))
     with database.session() as db:
         user = ensure_user(db, 2)
-        assert user.interested_in("llm") and user.interested_in_vpn
+        assert user in mailing_audience(db, topic)
+        if topic == "cluster":
+            assert [u.telegram_id for u in mailing_audience(db, topic)] == [2]
+        assert user.interested_in(topic) and user.interested_in_vpn
         assert not user.alerts_active
-    click(query("interest:llm:off"))
+    click(query(f"interest:{topic}:off"))
     with database.session() as db:
-        assert not ensure_user(db, 2).interested_in("llm")
+        assert ensure_user(db, 2) not in mailing_audience(db, topic)
 
 
 def test_group_then_native_text_now_and_no_retarget_or_duplicate(
@@ -102,7 +106,7 @@ def test_group_then_native_text_now_and_no_retarget_or_duplicate(
         row[0].text
         for row in msg.reply_text.call_args.kwargs["reply_markup"].inline_keyboard
     ]
-    assert labels == ["VPN", "Alerts", "LLM", "Cancel"]
+    assert labels == ["VPN", "Alerts", "LLM", "Cluster", "Cancel"]
     q = callback(identity, "llm")
     asyncio.run(group_callback(q, NS()))
     with database.session() as db:

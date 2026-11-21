@@ -364,10 +364,10 @@ paths:
     get:
       tags: [alerts, vpn]
       operationId: getAudience
-      summary: Получатели групп VPN, Alerts и LLM
+      summary: Получатели групп VPN, Alerts, LLM и Cluster
       description: |
         username без символа @. Его может не быть, тогда остаётся telegram_id.
-        Списки VPN и LLM — по выбранным интересам; Alerts — выбранный интерес и одобрение владельца.
+        Списки VPN, LLM и Cluster — по выбранным интересам; Alerts — выбранный интерес и одобрение владельца.
       responses:
         "200":
           description: Три списка по группам
@@ -718,6 +718,10 @@ components:
     Audience:
       type: object
       properties:
+        cluster:
+          type: array
+          items:
+            $ref: "#/components/schemas/Person"
         llm:
           type: array
           items:

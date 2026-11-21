@@ -1,6 +1,6 @@
 # Interest-targeted mailings
 
-Owner-only private flow: `/mailing` → **VPN / Alerts / LLM** → send text → native
+Owner-only private flow: `/mailing` → **VPN / Alerts / LLM / Cluster** → send text → native
 body preview → day/hour or **Now**. `/mailing TEXT` is an optional shortcut, but
 still requires explicit group selection. No group silently defaults for the new
 interactive flow. **Cancel** cancels an unfinished group/text draft; starting a
@@ -12,18 +12,18 @@ has an awaiting-text draft. Body and native UTF-16 entities are validated/persis
 before preview, and loaded from durable state at delivery. Photos/captions aren't
 accepted as mailing text by this flow.
 
-`Broadcast.audience_group` stores one of `vpn`, `alerts`, `llm` after selection;
+`Broadcast.audience_group` stores one of `vpn`, `alerts`, `llm`, `cluster` after selection;
 NULL is only an unselected/cancelled interactive draft. Migration0022 backfills
 EVERY existing mailing to `vpn`, including sent and scheduled rows. New interest
 LLM is opt-in: no historical member inference and no key provisioning. All manual,
 scheduled and legacy approval sends resolve the stored group; unknown/NULL groups
 refuse sending, never fall back to VPN or all users. Alerts mailings preserve the
-owner-approval boundary (selected interest AND permanent approval); VPN/LLM use
+owner-approval boundary (selected interest AND permanent approval); VPN/LLM/Cluster use
 selected interests. Audiences use current membership at SEND time, matching prior
 VPN scheduling behavior, not membership when drafting. Counts shown on scheduling
 are explicitly current counts, not frozen audience guarantees. Internal plaintext
 `POST /v1/broadcasts` retains its VPN default for compatibility. Internal audience
-API adds `llm` alongside unchanged `vpn` and approved `alerts` lists.
+API includes `cluster` and `llm` alongside unchanged `vpn` and approved `alerts` lists.
 
 Group is shown on time selection, immediate/scheduled summaries and original-time
 ordered history. In-place edits remain receipt-only: editing doesn't recompute the

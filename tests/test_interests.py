@@ -171,6 +171,7 @@ def test_start_keeps_flags_and_renders_all_registered_topics(
         "interest:vpn:off",
         "interest:alerts:off",
         "interest:llm:on",
+        "interest:cluster:on",
         "interest:future:off",
     ]
     with database.session() as db:
@@ -195,6 +196,7 @@ def test_users_command_lists_one_interest(interests_store):
         "users:vpn",
         "users:alerts",
         "users:llm",
+        "users:cluster",
     ]
     q = query("users:alerts", actor=1)
     click(q)

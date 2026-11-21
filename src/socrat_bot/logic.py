@@ -252,8 +252,9 @@ def audience(db: Session) -> dict:
     def person(user: User) -> dict:
         return {"telegram_id": user.telegram_id, "username": user.username, "admin_level": user.admin_level, "receive_level": user.receive_level}
 
-    vpn = sorted(vpn_audience(db), key=lambda user: user.telegram_id)
-    return {"vpn": [person(user) for user in vpn], "alerts": [person(user) for user in alert_recipients(db)], "llm": [person(user) for user in mailing_audience(db, "llm")]}
+    from .mailing_compose import GROUPS
+
+    return {group: [person(user) for user in mailing_audience(db, group)] for group in GROUPS}
 
 
 
