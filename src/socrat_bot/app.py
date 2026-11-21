@@ -14,7 +14,7 @@ from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 
-from socrat_bot.telegram_reply import reply_text
+from socrat_bot.telegram_reply import accepted_start, reply_text
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -208,8 +208,9 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or update.message is None:
         return
+    operation = accepted_start()
     if update.effective_chat.id != user.id:
-        await reply_text(update.message, "Open /start in private chat to choose your interests.")
+        await reply_text(update.message, "Open /start in private chat to choose your interests.", operation=operation)
         return
     arg = context.args[0] if context.args else ""
     with session() as db:
@@ -217,17 +218,16 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         interests = {row.topic for row in person.interests if row.enabled}
         approved = bool(person.alerts_approved)
         owner = person.role == "owner"
-        log.info("telegram start")
         if arg.startswith("link_"):
             outcome = consume_link(db, user.id, arg.removeprefix("link_"))
             text = "Link saved." if outcome == "linked" else "The code is invalid or already used."
         else:
             text = _start_text(interests, approved)
     if arg.startswith("link_"):
-        await reply_text(update.message, text)
+        await reply_text(update.message, text, operation=operation)
         return
     keyboard = _start_keyboard(interests, approved)
-    await reply_text(update.message, text, reply_markup=keyboard)
+    await reply_text(update.message, text, operation=operation, reply_markup=keyboard)
     if owner and not await sync_owner_menu(context.bot, user.id):
         log.info("telegram commands failed")
 
