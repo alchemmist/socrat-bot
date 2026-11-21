@@ -1304,7 +1304,7 @@ def test_mute_completion_cannot_annotate_refired_incident(store, monkeypatch):
             asyncio.run, app.on_callback(SimpleNamespace(callback_query=query), context)
         )
         assert entered.wait(10)
-        assert edited.is_set()
+        assert not edited.is_set()  # never block the mute on a preliminary Telegram edit
         try:
             with database.session() as db:
                 route(db, "disk", False)

@@ -97,3 +97,33 @@ def test_shared_legacy_comment_is_not_an_action_receipt():
         "status": "failed",
         "reason": "legacy_overlap",
     }
+
+
+def test_transient_readback_failure_recovers_before_first_post():
+    calls = []
+
+    def handler(req):
+        calls.append(req.method)
+        if len(calls) == 1:
+            raise httpx.ConnectTimeout("fixture")
+        return httpx.Response(
+            200, json=[] if req.method == "GET" else {"silenceID": "ok"}
+        )
+
+    assert run(handler, {"status": "failed", "error": ""})["status"] == "silenced"
+    assert calls == ["GET"] * 4 + ["POST"]
+
+
+def test_final_pre_send_failures_expose_safe_per_route_timing():
+    def handler(req):
+        raise httpx.ConnectTimeout("private fixture")
+
+    result = run(handler)
+    assert result["reason"] == "not_connected"
+    assert [r["route"] for r in result["attempts"]] == [
+        "service",
+        "peer_0",
+        "peer_1",
+        "service",
+    ]
+    assert "private fixture" not in str(result)
