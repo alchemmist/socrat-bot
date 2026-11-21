@@ -527,6 +527,7 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
                             Action.chat_id == p.get("source"),
                             Action.type == "alert.silence",
                             Action.status == "pending",
+                            Action.payload["key"].as_string() == incident.key,
                         )
                     )
                 )
@@ -551,6 +552,7 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
                         Action.chat_id == p["chat_id"],
                         Action.type == "alert.silence",
                         Action.status == "pending",
+                        Action.payload["key"].as_string() == incident.key,
                     )
                 )
             )
@@ -822,6 +824,7 @@ def finish_work(work: Work, data: dict) -> bool:
                 Action.chat_id == p["chat_id"],
                 Action.type == "alert.silence",
                 Action.status == "pending",
+                Action.payload["key"].as_string() == incident.key,
             )
         ):
             if (

@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 
 SERVICE = 'socrat-bot'
-EVENTS = {'mute feedback edit failed', 'telegram command accepted', 'telegram reply attempt', 'telegram reply result', 'card delivery', 'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
+EVENTS = {'action callback', 'mute feedback edit failed', 'telegram command accepted', 'telegram reply attempt', 'telegram reply result', 'card delivery', 'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
 
 
 class JsonFormatter(logging.Formatter):
@@ -50,6 +50,16 @@ class JsonFormatter(logging.Formatter):
             outcome = getattr(record, "outcome", None)
             if outcome in ("confirmed", "connect_timeout", "unconfirmed"):
                 data["outcome"] = outcome
+        if message == "action callback":
+            operation = getattr(record, "operation", None)
+            stage = getattr(record, "stage", None)
+            failure = getattr(record, "failure_kind", None)
+            if failure is not None:
+                data["failure_kind"] = failure if failure in ("TimeoutError", "OperationalError", "IntegrityError", "ValueError", "TypeError", "KeyError", "BadRequest", "TimedOut", "NetworkError") else "other"
+            if isinstance(operation, str) and re.fullmatch(r"[0-9a-f]{32}", operation):
+                data["operation"] = operation
+            if stage in ("received", "handler", "acknowledged", "ack_unconfirmed", "invalid", "missing", "denied", "stale", "dispatch", "silenced", "not_silenced", "handler_error", "preflight_error", "decode_or_dispatch_error"):
+                data["stage"] = stage
         if message == "card delivery":
             choices = {
                 "kind": {"card", "spi", "notice", "retire"},

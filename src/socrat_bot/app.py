@@ -18,7 +18,7 @@ from socrat_bot.telegram_reply import accepted_start, reply_text
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from socrat_bot import media
+from socrat_bot import callback_trace, media
 from socrat_bot.cards import (
     Card,
     Link,
@@ -603,6 +603,60 @@ async def _approve_alerts(query) -> None:
         pass
 
 
+def _prepare_callback(action_id, actor_id, username):
+    """Use a worker-owned DB session; never stall the webhook loop on row locks."""
+    from sqlalchemy import update as sql_update
+    legacy = None
+    with session() as db:
+        candidate = db.get(Action, action_id)
+        if candidate and candidate.type == "broadcast.send":
+            if not is_owner(db, actor_id):
+                return ("rejected", ("denied", "Недостаточно прав."))
+            if candidate.status != "pending" or (candidate.expires_at and as_utc(candidate.expires_at) < datetime.now(timezone.utc)):
+                return ("rejected", ("stale", "Действие уже завершено или истекло."))
+            claimed = db.execute(sql_update(Action).where(Action.id == action_id, Action.status == "pending").values(status="running")).rowcount
+            if not claimed:
+                return ("rejected", ("stale", "Действие уже выполняется."))
+            row = db.get(Broadcast, uuid.UUID(candidate.payload["broadcast_id"]))
+            if row is None or row.status != "preview":
+                candidate.status = "failed"
+                return ("rejected", ("stale", "Предпросмотр рассылки больше недоступен."))
+            row.status = "sending"
+            legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
+    if legacy:
+        return ("broadcast", legacy)
+    mute_generation = None
+    preview = None
+    preview_base = ""
+    preview_minutes = 60
+    preview_photo = False
+    is_mute = False
+    rejected = None
+    with session() as db:
+        action = db.get(Action, action_id)
+        if action is None:
+            rejected = ("missing", "Кнопка больше недоступна.")
+        else:
+            person = ensure_user(db, actor_id, username)
+            is_mute = action.type == "alert.silence"
+            if not (person.role == "owner" or (is_mute and person.alerts_active)):
+                rejected = ("denied", "Недостаточно прав для этого действия.")
+            elif is_mute and action.payload.get("key"):
+                incident = db.get(Incident, action.payload["key"])
+                copy = db.get(TelegramCard, (action.payload["key"], action.chat_id))
+                if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
+                    rejected = ("stale", "Алерт закрыт или карточка устарела.")
+                elif incident:
+                    mute_generation = incident.generation
+                    preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
+                    preview_minutes = int((action.payload or {}).get("minutes") or 60)
+                    preview_photo = getattr(copy, "message_kind", None) == "photo"
+                    preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
+    if rejected:
+        return ("rejected", rejected)
+    return ("ready", (preview, preview_base, preview_minutes, preview_photo, is_mute, mute_generation))
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None or query.data is None:
@@ -714,33 +768,43 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not query.data.startswith("act:"):
         return
-    try:
-        await asyncio.wait_for(query.answer("Запрос принят. Проверяю…"), timeout=2)
-    except Exception:
-        pass
+    callback_trace.stage("handler")
+    async def acknowledge(message):
+        try:
+            await asyncio.wait_for(query.answer(message), timeout=2)
+            callback_trace.stage("acknowledged")
+        except Exception:
+            callback_trace.stage("ack_unconfirmed")
     actor = str(query.from_user.id)
     mute_generation = None
-    action_id = uuid.UUID(query.data.removeprefix("act:"))
-    from sqlalchemy import update as sql_update
-    legacy = None
-    with session() as db:
-        candidate = db.get(Action, action_id)
-        if candidate and candidate.type == "broadcast.send":
-            if not is_owner(db, query.from_user.id):
-                return
-            if candidate.status != "pending" or (candidate.expires_at and as_utc(candidate.expires_at) < datetime.now(timezone.utc)):
-                return
-            claimed = db.execute(sql_update(Action).where(Action.id == action_id, Action.status == "pending").values(status="running")).rowcount
-            if not claimed:
-                return
-            row = db.get(Broadcast, uuid.UUID(candidate.payload["broadcast_id"]))
-            if row is None or row.status != "preview":
-                candidate.status = "failed"
-                return
-            row.status = "sending"
-            legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
-    if legacy:
-        broadcast_id, body, recipients = legacy
+    try:
+        action_id = uuid.UUID(query.data.removeprefix("act:"))
+    except ValueError:
+        callback_trace.stage("invalid")
+        await acknowledge("Кнопка недействительна.")
+        return
+    preparation = asyncio.create_task(asyncio.to_thread(_prepare_callback, action_id, query.from_user.id, query.from_user.username))
+    done, _ = await asyncio.wait({preparation}, timeout=0.75)
+    acknowledged = not done
+    if acknowledged:
+        await acknowledge("Запрос принят. Проверяю…")
+    try:
+        kind, data = await preparation
+    except Exception as exc:
+        callback_trace.stage("preflight_error", exception=exc)
+        if not acknowledged:
+            await acknowledge("Не удалось проверить действие. Попробуйте позже.")
+        return
+    if kind == "rejected":
+        reason, message = data
+        callback_trace.stage(reason)
+        if not acknowledged:
+            await acknowledge(message)
+        return
+    if not acknowledged:
+        await acknowledge("Запрос принят. Проверяю…")
+    if kind == "broadcast":
+        broadcast_id, body, recipients = data
         result = await deliver_broadcast(body, recipients, broadcast_id)
         with session() as db:
             row = db.get(Broadcast, broadcast_id)
@@ -749,32 +813,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             action.status, action.result = "done", result
         await query.edit_message_text(_delivery_notice("Broadcast", result) + f"\nMailing {broadcast_id}\nReply: /mailing_edit NEW_TEXT")
         return
-    preview = None
-    preview_base = ""
-    preview_minutes = 60
-    preview_photo = False
-    is_mute = False
-    with session() as db:
-        action = db.get(Action, action_id)
-        if action is None:
-            return
-        person = ensure_user(db, query.from_user.id, query.from_user.username)
-        allowed = person.role == "owner" or (action.type == "alert.silence" and person.alerts_active)
-        if not allowed:
-            await query.edit_message_text("This action is available to the owner only.")
-            return
-        is_mute = action.type == "alert.silence"
-        if is_mute and action.payload.get("key"):
-            incident = db.get(Incident, action.payload["key"])
-            copy = db.get(TelegramCard, (action.payload["key"], action.chat_id))
-            if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
-                return
-            mute_generation = incident.generation if incident else None
-            if mute_generation is not None:
-                preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
-                preview_minutes = int((action.payload or {}).get("minutes") or 60)
-                preview_photo = getattr(copy, "message_kind", None) == "photo"
-                preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
+    preview, preview_base, preview_minutes, preview_photo, is_mute, mute_generation = data
     # The Telegram preview used to block the Alertmanager request. Run the mute
     # with its own transaction and event loop: unrelated synchronous DB work in
     # other callbacks must not consume this client's transport timeout budget.
@@ -789,8 +828,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     if not current_incident or current_incident.status != "firing" or current_incident.generation != mute_generation:
                         return {"status": "stale"}
                 return asyncio.run(apply_action(worker_db, current, actor))
+        callback_trace.stage("dispatch")
         mute_result = await asyncio.to_thread(run_mute)
+        callback_trace.stage("silenced" if mute_result.get("status") == "silenced" else "not_silenced")
         if mute_result.get("status") == "stale":
+            callback_trace.stage("stale")
             return
     with session() as db:
         action = db.get(Action, action_id)
@@ -974,6 +1016,7 @@ async def lifespan(app: FastAPI):
             ptb.add_handler(CommandHandler(command.name, globals()[command.handler]))
         ptb.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/mailing_edit(?:\s|$)"), on_mailing_edit))
         ptb.add_handler(CallbackQueryHandler(on_callback))
+        ptb.add_error_handler(_ptb_error)
         from .mailing_compose import receive_text
         ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text))
         await ptb.initialize()
@@ -1023,14 +1066,25 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     return {"ok": True}
 
 
+async def _ptb_error(update, context):
+    # process_update dispatches exceptions to error handlers, not its caller.
+    callback_trace.stage("handler_error", exception=context.error)
+    log.error("telegram update failed")
+
+
 async def _run_update(payload: dict) -> None:
     if ptb is None:
         return
+    token = callback_trace.start(payload)
     try:
         update = Update.de_json(payload, ptb.bot)
         await ptb.process_update(update)
     except Exception:
+        callback_trace.stage("decode_or_dispatch_error")
         log.error("telegram update failed")
+    finally:
+        if token is not None:
+            callback_trace.operation.reset(token)
 
 
 @api.post("/v1/messages")
