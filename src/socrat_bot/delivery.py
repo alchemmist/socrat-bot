@@ -21,6 +21,7 @@ from socrat_bot.escalation import (
     _deliver_work,
     delivery_state,
     enqueue_card,
+    enqueue_locked_card,
     marker,
     prepare_work,
     route,
@@ -147,6 +148,9 @@ def annotate_card(
         # Locks above retain canonical ordering. Prioritize only after acquisition.
         if preferred_chat is not None:
             states.sort(key=lambda state: state.chat_id != preferred_chat)
+        applied_cards = {card.chat_id: card for card in db.scalars(
+            select(TelegramCard).where(TelegramCard.key == key)
+        )}
         jobs = []
         for state in states:
             if chat_id is not None and state.chat_id != chat_id:
@@ -163,7 +167,7 @@ def annotate_card(
                 if "<i>" in state.text:
                     text += "\n\n" + state.text[state.text.rfind("<i>") :]
             if url:
-                applied = db.get(TelegramCard, (key, state.chat_id))
+                applied = applied_cards.get(state.chat_id)
                 if (
                     applied
                     and applied.desired_link_revision > 0
@@ -183,8 +187,8 @@ def annotate_card(
                 if "<i>" in text:
                     text = text[: text.rfind("<i>")].rstrip()
                 text += "\n\n" + mute
-            jobs.append(enqueue_card(db, incident, state.chat_id, text=text))
-            card = db.get(TelegramCard, (key, state.chat_id))
+            jobs.append(enqueue_locked_card(db, incident, state, text=text))
+            card = applied_cards.get(state.chat_id)
             if card and card.generation == incident.generation:
                 card.text = marker(text, incident)
                 card.note = state.note
