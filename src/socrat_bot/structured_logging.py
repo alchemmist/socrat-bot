@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 
 SERVICE = 'socrat-bot'
-EVENTS = {'card delivery', 'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
+EVENTS = {'telegram command accepted', 'telegram reply attempt', 'telegram reply result', 'card delivery', 'telegram commands synced', 'telegram commands failed', 'application started', 'application stopped', 'http request completed', 'telegram start', 'card note failed', 'spi link failed', 'action webhook failed', 'telegram update failed', 'alert card failed', 'broadcast completed', 'telegram webhook completed', 'broadcast loop failed'}
 
 
 class JsonFormatter(logging.Formatter):
@@ -39,6 +39,17 @@ class JsonFormatter(logging.Formatter):
                 value = getattr(record, key, None)
                 if type(value) in (int, float) and math.isfinite(value):
                     data[key] = value
+        if message in {"telegram command accepted", "telegram reply attempt", "telegram reply result"}:
+            operation = getattr(record, "operation", None)
+            if isinstance(operation, str) and re.fullmatch(r"[0-9a-f]{32}", operation):
+                data["operation"] = operation
+            for key in ("attempt", "duration_ms"):
+                value = getattr(record, key, None)
+                if type(value) is int and 0 <= value <= 2**63 - 1:
+                    data[key] = value
+            outcome = getattr(record, "outcome", None)
+            if outcome in ("confirmed", "connect_timeout", "unconfirmed"):
+                data["outcome"] = outcome
         if message == "card delivery":
             choices = {
                 "kind": {"card", "spi", "notice", "retire"},
