@@ -154,4 +154,14 @@ def test_one_verified_receipt_suffices_but_no_new_write_on_partial_readback():
 
 def test_display_and_event_share_transport_duration_policy():
     from socrat_bot.mute_transport import mute_minutes
-    assert [mute_minutes(p) for p in ({}, {'minutes': 0}, {'minutes': -2}, {'minutes': 15}, {'minutes': 5000})] == [60, 60, 1, 15, 1440]
+
+    assert [
+        mute_minutes(p)
+        for p in (
+            {},
+            {"minutes": 0},
+            {"minutes": -2},
+            {"minutes": 15},
+            {"minutes": 5000},
+        )
+    ] == [60, 60, 1, 15, 1440]
