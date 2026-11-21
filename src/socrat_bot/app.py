@@ -857,11 +857,16 @@ async def _broadcast_loop() -> None:
 
 
 def _mute_failure(result: dict) -> str:
-    if result.get("status") == "running": return "Mute request in progress."
-    if result.get("status") == "expired": return "This mute button has expired."
-    if result.get("reason") == "not_connected": return "Alertmanager could not be reached. Tap Mute to retry."
-    if result.get("reason") == "legacy_overlap": return "A matching silence already exists; no additional mute was created."
-    if result.get("reason") == "invalid_matchers": return "Mute rejected: missing alert matchers."
+    if result.get("status") == "running":
+        return "Mute request in progress."
+    if result.get("status") == "expired":
+        return "This mute button has expired."
+    if result.get("reason") == "not_connected":
+        return "Alertmanager could not be reached. Tap Mute to retry."
+    if result.get("reason") == "legacy_overlap":
+        return "A matching silence already exists; no additional mute was created."
+    if result.get("reason") == "invalid_matchers":
+        return "Mute rejected: missing alert matchers."
     return "Mute not confirmed. Tap Mute to check Alertmanager again."
 
 
