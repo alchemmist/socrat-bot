@@ -9,6 +9,12 @@ from telegram.error import TimedOut
 from socrat_bot.telegram_reply import reply_text
 
 
+@pytest.fixture(autouse=True)
+def capture_nonpropagating_logger(monkeypatch):
+    import logging
+    monkeypatch.setattr(logging.getLogger('socrat-bot'), 'propagate', True)
+
+
 @pytest.mark.parametrize(
     "cause,retry", [(httpx.ConnectTimeout, True), (httpx.ReadTimeout, False)]
 )
@@ -82,7 +88,7 @@ def test_redacted_attempt_history(sequence, outcomes, caplog):
     assert [r['attempt'] for r in results] == list(range(1, len(outcomes) + 1))
     assert all(r['duration_ms'] >= 0 for r in results)
     assert 'PRIVATE_CANARY' not in json.dumps(records)
-    assert message.reply_text.await_count == len(sequence)
+    assert message.reply_text.await_count == len(outcomes)
 
 
 def test_telegram_accepts_send_but_http_reply_is_lost(caplog):
@@ -114,4 +120,12 @@ def test_telegram_accepts_send_but_http_reply_is_lost(caplog):
     with caplog.at_level(logging.WARNING, logger='socrat-bot'):
         asyncio.run(run())
     assert accepted == ['applied']
+    assert [r.outcome for r in caplog.records if hasattr(r, 'outcome')] == ['unconfirmed']
+
+
+def test_cancelled_attempt_is_unconfirmed_and_never_retried(caplog):
+    message = SimpleNamespace(reply_text=AsyncMock(side_effect=asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(reply_text(message, 'test'))
+    assert message.reply_text.await_count == 1
     assert [r.outcome for r in caplog.records if hasattr(r, 'outcome')] == ['unconfirmed']

@@ -1,4 +1,5 @@
 """Correlate a reply without recording Telegram payloads or recipients."""
+import asyncio
 import logging
 import time
 import uuid
@@ -23,7 +24,7 @@ async def reply_text(message, text, *, operation=None, **kwargs):
         start = time.monotonic()
         try:
             result = await message.reply_text(text, connect_timeout=15, **kwargs)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             before_send = isinstance(exc, TimedOut) and isinstance(exc.__cause__, httpx.ConnectTimeout)
             outcome = "connect_timeout" if before_send else "unconfirmed"
             log.warning("telegram reply result", extra={**fields, "outcome": outcome, "duration_ms": round(1000 * (time.monotonic() - start))})
