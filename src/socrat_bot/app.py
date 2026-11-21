@@ -701,7 +701,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 result = escalate(db, *args, pressed_jobs=jobs)
             return result, jobs
         callback_trace.stage("escalate_dispatch")
-        result, jobs = await asyncio.to_thread(transition)
+        try:
+            result, jobs = await asyncio.to_thread(transition)
+        except Exception as exc:
+            callback_trace.stage("handler_error", exception=exc)
+            await query.answer("Не удалось подтвердить эскалацию. Проверьте уровень карточки.")
+            return
         callback_trace.stage("escalated" if jobs else "not_escalated")
         # After commit, edit the pressed copy without waiting for a toast or
         # for the background queue of unrelated deliveries. Same fenced job.

@@ -144,3 +144,27 @@ def test_escalation_delivers_committed_pressed_copy_while_answer_is_in_flight(
     monkeypatch.setattr(app, "session", session)
     monkeypatch.setattr(app, "escalate", escalate)
     asyncio.run(run())
+
+
+def test_escalation_worker_failure_answers_without_dispatch(monkeypatch):
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(app, "session", nullcontext)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("private")
+
+    monkeypatch.setattr(app, "escalate", fail)
+    send = AsyncMock()
+    monkeypatch.setattr(app, "dispatch_jobs", send)
+    q = SimpleNamespace(
+        data="esc:digest:1:20",
+        from_user=SimpleNamespace(id=1),
+        message=SimpleNamespace(chat_id=1, message_id=2),
+        answer=AsyncMock(),
+    )
+    asyncio.run(app.on_callback(SimpleNamespace(callback_query=q), None))
+    q.answer.assert_awaited_once_with(
+        "Не удалось подтвердить эскалацию. Проверьте уровень карточки."
+    )
+    send.assert_not_awaited()

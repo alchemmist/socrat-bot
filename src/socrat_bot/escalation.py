@@ -228,10 +228,7 @@ def escalate(
     if incident is None:
         return "Stale incident"
     if (
-        not card
-        or card.message_id != message_id
-        or card.generation != generation
-        or incident.generation != generation
+        incident.generation != generation
         or incident.status != "firing"
         or incident.level != expected
         or user.admin_level > expected
