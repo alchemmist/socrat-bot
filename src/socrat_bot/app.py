@@ -14,6 +14,7 @@ from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 
+from socrat_bot.mute_transport import mute_minutes
 from socrat_bot.telegram_reply import accepted_start, reply_text
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -631,7 +632,7 @@ def _prepare_callback(action_id, actor_id, username):
                 elif incident:
                     mute_generation = incident.generation
                     preview_base = (copy.text if copy and copy.text else "") or ((action.payload or {}).get("card") or "")
-                    preview_minutes = int((action.payload or {}).get("minutes") or 60)
+                    preview_minutes = mute_minutes(action.payload)
                     preview_photo = getattr(copy, "message_kind", None) == "photo"
                     preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
     if rejected:
@@ -835,7 +836,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "telegram_id": query.from_user.id,
                 "username": query.from_user.username,
                 "key": key,
-                "minutes": int((action.payload or {}).get("minutes") or 0),
+                "minutes": mute_minutes(action.payload),
             })
         else:
             key = ""
@@ -843,7 +844,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _show_muted_message(query, failure, preview_photo, getattr(query.message, "reply_markup", None))
         return
     if key and text:
-        footer = _muted_footer(int((action.payload or {}).get("minutes") or 60))
+        footer = _muted_footer(mute_minutes(action.payload))
         try:
             _recipients, jobs = await asyncio.to_thread(
                 annotate_card, key, mute=footer, expected_generation=mute_generation,
@@ -928,7 +929,7 @@ def _with_footer(text: str, footer: str) -> str:
 
 def _result_text(action: Action, result: dict) -> str:
     if action.type == "alert.silence":
-        minutes = int((action.payload or {}).get("minutes") or 60)
+        minutes = mute_minutes(action.payload)
         footer = _muted_footer(minutes) if result.get("status") == "silenced" else _muted_footer(minutes, _mute_failure(result))
         card = (action.payload or {}).get("card")
         return _with_footer(card or "", footer)
