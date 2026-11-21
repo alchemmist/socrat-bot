@@ -691,11 +691,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if query.data.startswith("esc:"):
         try:
             _, digest, generation, level = query.data.split(":")
-            with session() as db:
-                result = escalate(db, query.from_user.id, query.message.chat_id, query.message.message_id, digest, int(generation), int(level))
-            await query.answer(result)
+            args = (query.from_user.id, query.message.chat_id, query.message.message_id, digest, int(generation), int(level))
         except (ValueError, AttributeError):
             await query.answer("Invalid escalation")
+            return
+        def transition():
+            jobs = []
+            with session() as db:
+                result = escalate(db, *args, pressed_jobs=jobs)
+            return result, jobs
+        callback_trace.stage("escalate_dispatch")
+        try:
+            result, jobs = await asyncio.to_thread(transition)
+        except Exception as exc:
+            callback_trace.stage("handler_error", exception=exc)
+            await query.answer("Не удалось подтвердить эскалацию. Проверьте уровень карточки.")
+            return
+        callback_trace.stage("escalated" if jobs else "not_escalated")
+        # After commit, edit the pressed copy without waiting for a toast or
+        # for the background queue of unrelated deliveries. Same fenced job.
+        await asyncio.gather(query.answer(result), dispatch_jobs(jobs))
         return
     if query.data.startswith("rl:"):
         with session() as db:
@@ -767,10 +782,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await acknowledge("Кнопка недействительна.")
         return
     preparation = asyncio.create_task(asyncio.to_thread(_prepare_callback, action_id, query.from_user.id, query.from_user.username))
-    done, _ = await asyncio.wait({preparation}, timeout=0.75)
+    def start_ack():
+        task = asyncio.create_task(acknowledge("Запрос принят. Проверяю…"))
+        _updates.add(task)
+        task.add_done_callback(_updates.discard)
+    done, _ = await asyncio.wait({preparation}, timeout=0.1)
     acknowledged = not done
     if acknowledged:
-        await acknowledge("Запрос принят. Проверяю…")
+        start_ack()
     try:
         kind, data = await preparation
     except Exception as exc:
@@ -785,7 +804,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await acknowledge(message)
         return
     if not acknowledged:
-        await acknowledge("Запрос принят. Проверяю…")
+        start_ack()
     if kind == "broadcast":
         broadcast_id, body, recipients = data
         result = await deliver_broadcast(body, recipients, broadcast_id)

@@ -58,7 +58,7 @@ class JsonFormatter(logging.Formatter):
                 data["failure_kind"] = failure if failure in ("TimeoutError", "OperationalError", "IntegrityError", "ValueError", "TypeError", "KeyError", "BadRequest", "TimedOut", "NetworkError") else "other"
             if isinstance(operation, str) and re.fullmatch(r"[0-9a-f]{32}", operation):
                 data["operation"] = operation
-            if stage in ("received", "handler", "acknowledged", "ack_unconfirmed", "invalid", "missing", "denied", "stale", "dispatch", "silenced", "not_silenced", "handler_error", "preflight_error", "decode_or_dispatch_error"):
+            if stage in ("escalate_dispatch", "escalated", "not_escalated", "received", "handler", "acknowledged", "ack_unconfirmed", "invalid", "missing", "denied", "stale", "dispatch", "silenced", "not_silenced", "handler_error", "preflight_error", "decode_or_dispatch_error"):
                 data["stage"] = stage
         if message == "card delivery":
             choices = {
