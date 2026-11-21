@@ -1,6 +1,7 @@
 import asyncio
 import os
 import uuid
+from contextvars import ContextVar
 from contextlib import asynccontextmanager
 from datetime import timezone, datetime
 
@@ -589,7 +590,13 @@ async def _approve_alerts(query) -> None:
 def _prepare_callback(action_id, actor_id, username):
     """Use a worker-owned DB session; never stall the webhook loop on row locks."""
     from sqlalchemy import update as sql_update
-    legacy = None
+    mute_generation = None
+    preview = None
+    preview_base = ""
+    preview_minutes = 60
+    preview_photo = False
+    is_mute = False
+    rejected = None
     with session() as db:
         candidate = db.get(Action, action_id)
         if candidate and candidate.type == "broadcast.send":
@@ -605,18 +612,8 @@ def _prepare_callback(action_id, actor_id, username):
                 candidate.status = "failed"
                 return ("rejected", ("stale", "Предпросмотр рассылки больше недоступен."))
             row.status = "sending"
-            legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
-    if legacy:
-        return ("broadcast", legacy)
-    mute_generation = None
-    preview = None
-    preview_base = ""
-    preview_minutes = 60
-    preview_photo = False
-    is_mute = False
-    rejected = None
-    with session() as db:
-        action = db.get(Action, action_id)
+            return ("broadcast", (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)]))
+        action = candidate
         if action is None:
             rejected = ("missing", "Кнопка больше недоступна.")
         else:
@@ -638,6 +635,17 @@ def _prepare_callback(action_id, actor_id, username):
     if rejected:
         return ("rejected", rejected)
     return ("ready", (preview, preview_base, preview_minutes, preview_photo, is_mute, mute_generation))
+
+
+# Task-local: concurrent webhook updates must not inherit each other's receipt.
+_webhook_receipt = ContextVar("webhook_receipt", default=False)
+
+
+async def _action_notice(query, text):
+    if _webhook_receipt.get():
+        await query.message.reply_text(text)
+    else:
+        await query.answer(text)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -693,7 +701,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _, digest, generation, level = query.data.split(":")
             args = (query.from_user.id, query.message.chat_id, query.message.message_id, digest, int(generation), int(level))
         except (ValueError, AttributeError):
-            await query.answer("Invalid escalation")
+            await _action_notice(query, "Invalid escalation")
             return
         def transition():
             jobs = []
@@ -705,12 +713,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             result, jobs = await asyncio.to_thread(transition)
         except Exception as exc:
             callback_trace.stage("handler_error", exception=exc)
-            await query.answer("Не удалось подтвердить эскалацию. Проверьте уровень карточки.")
+            await _action_notice(query, "Не удалось подтвердить эскалацию. Проверьте уровень карточки.")
             return
         callback_trace.stage("escalated" if jobs else "not_escalated")
         # After commit, edit the pressed copy without waiting for a toast or
         # for the background queue of unrelated deliveries. Same fenced job.
-        await asyncio.gather(query.answer(result), dispatch_jobs(jobs))
+        if _webhook_receipt.get() and jobs:
+            await dispatch_jobs(jobs)
+        else:
+            await asyncio.gather(_action_notice(query, result), dispatch_jobs(jobs))
         return
     if query.data.startswith("rl:"):
         with session() as db:
@@ -769,7 +780,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     callback_trace.stage("handler")
     async def acknowledge(message):
         try:
-            await asyncio.wait_for(query.answer(message), timeout=2)
+            await asyncio.wait_for(_action_notice(query, message), timeout=2)
             callback_trace.stage("acknowledged")
         except Exception:
             callback_trace.stage("ack_unconfirmed")
@@ -786,8 +797,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         task = asyncio.create_task(acknowledge("Запрос принят. Проверяю…"))
         _updates.add(task)
         task.add_done_callback(_updates.discard)
-    done, _ = await asyncio.wait({preparation}, timeout=0.1)
-    acknowledged = not done
+    acknowledged = False
+    if not _webhook_receipt.get():
+        done, _ = await asyncio.wait({preparation}, timeout=0.1)
+        acknowledged = not done
     if acknowledged:
         start_ack()
     try:
@@ -803,7 +816,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not acknowledged:
             await acknowledge(message)
         return
-    if not acknowledged:
+    if not acknowledged and not _webhook_receipt.get():
         start_ack()
     if kind == "broadcast":
         broadcast_id, body, recipients = data
@@ -1052,9 +1065,20 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if not expected or x_telegram_bot_api_secret_token != expected or ptb is None:
         raise HTTPException(status_code=401, detail="unauthorized")
     payload = await request.json()
-    task = asyncio.create_task(_run_update(payload))
+    query = payload.get("callback_query") or {}
+    chat = (query.get("message") or {}).get("chat") or {}
+    inline = (chat.get("type") == "private" and query.get("id") and
+              str(query.get("data", "")).startswith(("act:", "esc:")))
+    token = _webhook_receipt.set(bool(inline))
+    try:
+        task = asyncio.create_task(_run_update(payload))
+    finally:
+        _webhook_receipt.reset(token)
     _updates.add(task)
     task.add_done_callback(_updates.discard)
+    if inline:
+        return {"method": "answerCallbackQuery", "callback_query_id": query["id"],
+                "text": "Запрос принят. Проверяю…"}
     return {"ok": True}
 
 

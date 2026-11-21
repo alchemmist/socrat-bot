@@ -168,3 +168,31 @@ def test_escalation_worker_failure_answers_without_dispatch(monkeypatch):
         "Не удалось подтвердить эскалацию. Проверьте уровень карточки."
     )
     send.assert_not_awaited()
+
+
+def test_private_button_receipt_is_in_webhook_response(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "fixture")
+    monkeypatch.setattr(app, "ptb", object())
+    processed = []
+
+    async def worker(payload):
+        processed.append(app._webhook_receipt.get())
+
+    monkeypatch.setattr(app, "_run_update", worker)
+
+    async def run():
+        for data in ["act:fixture", "esc:digest:1:20", "users:topic"]:
+            payload = {"callback_query": {"id": "fixture", "data": data,
+                       "message": {"chat": {"type": "private"}}}}
+            response = await app.webhook(SimpleNamespace(json=AsyncMock(return_value=payload)), "fixture")
+            if data.startswith("users:"):
+                assert response == {"ok": True}
+            else:
+                assert response["method"] == "answerCallbackQuery"
+                assert response["callback_query_id"] == "fixture"
+            assert not app._webhook_receipt.get()
+        assert not processed
+        await asyncio.gather(*app._updates)
+
+    asyncio.run(run())
+    assert processed == [True, True, False]

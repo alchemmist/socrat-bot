@@ -325,7 +325,7 @@ def escalate(
                 cloned.append({**spec, "callback_data": f"act:{action.id}"})
             state.buttons = cloned
 
-        job = enqueue_card(db, incident, user.telegram_id, source=template.chat_id)
+        job = enqueue_locked_card(db, incident, state, source=template.chat_id)
         if pressed_jobs is not None and user.telegram_id == actor:
             pressed_jobs.append(job)
         if existing and user.admin_level == destination and user.telegram_id != actor:
