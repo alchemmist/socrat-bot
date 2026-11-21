@@ -715,7 +715,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not query.data.startswith("act:"):
         return
     try:
-        await query.answer()
+        await asyncio.wait_for(query.answer("Запрос принят. Проверяю…"), timeout=2)
     except Exception:
         pass
     actor = str(query.from_user.id)
@@ -753,6 +753,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     preview_base = ""
     preview_minutes = 60
     preview_photo = False
+    is_mute = False
     with session() as db:
         action = db.get(Action, action_id)
         if action is None:
@@ -762,7 +763,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not allowed:
             await query.edit_message_text("This action is available to the owner only.")
             return
-        if action.type == "alert.silence" and action.payload.get("key"):
+        is_mute = action.type == "alert.silence"
+        if is_mute and action.payload.get("key"):
             incident = db.get(Incident, action.payload["key"])
             copy = db.get(TelegramCard, (action.payload["key"], action.chat_id))
             if incident and (incident.status != "firing" or not copy or copy.generation != incident.generation or f":g{incident.generation}:" not in action.idempotency_key):
@@ -773,11 +775,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 preview_minutes = int((action.payload or {}).get("minutes") or 60)
                 preview_photo = getattr(copy, "message_kind", None) == "photo"
                 preview = _with_footer(preview_base, "<i>Requesting mute…</i>")
-    if preview:
-        await _show_muted_message(query, preview, preview_photo, getattr(query.message, "reply_markup", None))
+    # The Telegram preview used to block the Alertmanager request. Run the mute
+    # with its own transaction and event loop: unrelated synchronous DB work in
+    # other callbacks must not consume this client's transport timeout budget.
+    if is_mute:
+        def run_mute():
+            with session() as worker_db:
+                current = worker_db.get(Action, action_id)
+                if current is None:
+                    return {"status": "expired"}
+                if mute_generation is not None:
+                    current_incident = worker_db.get(Incident, current.payload["key"])
+                    if not current_incident or current_incident.status != "firing" or current_incident.generation != mute_generation:
+                        return {"status": "stale"}
+                return asyncio.run(apply_action(worker_db, current, actor))
+        mute_result = await asyncio.to_thread(run_mute)
+        if mute_result.get("status") == "stale":
+            return
     with session() as db:
         action = db.get(Action, action_id)
-        result = await apply_action(db, action, actor)
+        if action is None:
+            return  # deleted after the initial authorization; never edit an unverified card
+        result = mute_result if is_mute else await apply_action(db, action, actor)
         if preview and action.type == "alert.silence" and result.get("status") != "silenced":
             failure = _with_footer(preview_base, _muted_footer(preview_minutes, _mute_failure(result)))
         else:
@@ -871,14 +890,14 @@ def _mute_failure(result: dict) -> str:
 
 
 async def _show_muted_message(query, text: str, photo: bool, markup=None) -> None:
-    """Update the pressed card before Alertmanager responds. Photo cards use captions."""
+    """Report the actual outcome on the pressed text or photo card."""
     try:
         if photo:
             await query.edit_message_caption(caption=text, parse_mode="HTML", reply_markup=markup)
         else:
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
     except Exception:
-        pass
+        log.warning("mute feedback edit failed")
 
 
 def _muted_footer(minutes: int, failed: str | None = None) -> str:

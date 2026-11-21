@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from time import monotonic
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -62,18 +63,36 @@ async def execute(action, previous):
                     and x["status"]["state"] in ("active", "pending")
                 ]
 
-            try:
-                copies = await asyncio.gather(*(read(p) for p in peers))
-            except (httpx.HTTPError, KeyError, ValueError, TypeError):
-                return unknown
-            matches = [x for rows in copies for x in rows]
-            for x in matches:
-                if x["comment"] == marker:
-                    return {
-                        "status": "silenced",
-                        "silence": {"silenceID": x["id"]},
-                        "reconciled": True,
-                    }
+            for attempt in (1, 2):
+                responses = await asyncio.gather(
+                    *(read(p) for p in peers), return_exceptions=True
+                )
+                errors = {
+                    f"peer_{n}": type(value).__name__
+                    for n, value in enumerate(responses)
+                    if isinstance(value, Exception)
+                }
+                for value in responses:
+                    if isinstance(value, asyncio.CancelledError):
+                        raise value
+                matches = [
+                    x for rows in responses if isinstance(rows, list) for x in rows
+                ]
+                for x in matches:
+                    if x["comment"] == marker:
+                        return {
+                            "status": "silenced",
+                            "silence": {"silenceID": x["id"]},
+                            "reconciled": True,
+                        }
+                if not errors:
+                    break
+                if attempt == 2:
+                    return {**unknown, "read_errors": errors}
+                await asyncio.sleep(
+                    0.5
+                )  # GET only; never infer absence from partial results
+
             if matches:
                 # Legacy comments were shared. Do not claim another action's receipt.
                 return failure("legacy_overlap")
@@ -89,7 +108,12 @@ async def execute(action, previous):
             "createdBy": "socrat-bot",
             "comment": marker,
         }
-        for dest in (base, *peers):
+        attempts = []
+        routes = (base, *peers, base) if peers else (base, base)
+        for index, dest in enumerate(routes):
+            if index == len(routes) - 1:
+                await asyncio.sleep(1)  # only reached after proven pre-send failures
+            start = monotonic()
             try:
                 r = await client.post(dest + "/api/v2/silences", json=body)
                 r.raise_for_status()
@@ -97,7 +121,16 @@ async def execute(action, previous):
                 if not isinstance(sid, str) or not sid:
                     raise ValueError("no receipt")
                 return {"status": "silenced", "silence": {"silenceID": sid}}
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                attempts.append(
+                    {
+                        "route": "service"
+                        if dest == base
+                        else f"peer_{peers.index(dest)}",
+                        "error": type(exc).__name__,
+                        "ms": round(1000 * (monotonic() - start)),
+                    }
+                )
                 continue  # no request was sent on this connection
             except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
                 return {
@@ -105,4 +138,4 @@ async def execute(action, previous):
                     "stage": type(exc).__name__,
                     "attempted_at": datetime.now(timezone.utc).timestamp(),
                 }
-        return failure("not_connected")
+        return {**failure("not_connected"), "attempts": attempts}
