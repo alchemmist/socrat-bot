@@ -82,3 +82,21 @@ def test_slow_lookup_acknowledged_before_db_returns(monkeypatch):
     )
     asyncio.run(app.on_callback(NS(callback_query=query), None))
     assert answers == ["Запрос принят. Проверяю…"]
+
+
+def test_preflight_error_reports_failure_without_dispatch(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    def fail(*args):
+        raise RuntimeError("private")
+
+    monkeypatch.setattr(app, "_prepare_callback", fail)
+    query = NS(
+        data="act:00000000-0000-0000-0000-000000000001",
+        from_user=NS(id=1, username=None),
+        answer=AsyncMock(),
+    )
+    asyncio.run(app.on_callback(NS(callback_query=query), None))
+    query.answer.assert_awaited_once_with(
+        "Не удалось проверить действие. Попробуйте позже."
+    )

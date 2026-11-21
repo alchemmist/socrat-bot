@@ -611,16 +611,16 @@ def _prepare_callback(action_id, actor_id, username):
         candidate = db.get(Action, action_id)
         if candidate and candidate.type == "broadcast.send":
             if not is_owner(db, actor_id):
-                return ("blocked", None)
+                return ("rejected", ("denied", "Недостаточно прав."))
             if candidate.status != "pending" or (candidate.expires_at and as_utc(candidate.expires_at) < datetime.now(timezone.utc)):
-                return ("blocked", None)
+                return ("rejected", ("stale", "Действие уже завершено или истекло."))
             claimed = db.execute(sql_update(Action).where(Action.id == action_id, Action.status == "pending").values(status="running")).rowcount
             if not claimed:
-                return ("blocked", None)
+                return ("rejected", ("stale", "Действие уже выполняется."))
             row = db.get(Broadcast, uuid.UUID(candidate.payload["broadcast_id"]))
             if row is None or row.status != "preview":
                 candidate.status = "failed"
-                return ("blocked", None)
+                return ("rejected", ("stale", "Предпросмотр рассылки больше недоступен."))
             row.status = "sending"
             legacy = (row.id, row.text, [person.telegram_id for person in mailing_audience(db, row.audience_group)])
     if legacy:
@@ -788,9 +788,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     acknowledged = not done
     if acknowledged:
         await acknowledge("Запрос принят. Проверяю…")
-    kind, data = await preparation
-    if kind in ("blocked", "rejected"):
-        reason, message = data or ("denied", "Действие недоступно.")
+    try:
+        kind, data = await preparation
+    except Exception:
+        callback_trace.stage("preflight_error")
+        if not acknowledged:
+            await acknowledge("Не удалось проверить действие. Попробуйте позже.")
+        return
+    if kind == "rejected":
+        reason, message = data
         callback_trace.stage(reason)
         if not acknowledged:
             await acknowledge(message)

@@ -55,7 +55,7 @@ class JsonFormatter(logging.Formatter):
             stage = getattr(record, "stage", None)
             if isinstance(operation, str) and re.fullmatch(r"[0-9a-f]{32}", operation):
                 data["operation"] = operation
-            if stage in ("received", "handler", "acknowledged", "ack_unconfirmed", "invalid", "missing", "denied", "stale", "dispatch", "silenced", "not_silenced", "handler_error", "decode_or_dispatch_error"):
+            if stage in ("received", "handler", "acknowledged", "ack_unconfirmed", "invalid", "missing", "denied", "stale", "dispatch", "silenced", "not_silenced", "handler_error", "preflight_error", "decode_or_dispatch_error"):
                 data["stage"] = stage
         if message == "card delivery":
             choices = {
