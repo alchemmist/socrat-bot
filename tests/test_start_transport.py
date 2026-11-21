@@ -83,3 +83,35 @@ def test_redacted_attempt_history(sequence, outcomes, caplog):
     assert all(r['duration_ms'] >= 0 for r in results)
     assert 'PRIVATE_CANARY' not in json.dumps(records)
     assert message.reply_text.await_count == len(sequence)
+
+
+def test_telegram_accepts_send_but_http_reply_is_lost(caplog):
+    """Exercise PTB's actual httpx error mapping with a token-free, in-memory transport."""
+    import logging
+    from telegram import Bot
+    from telegram.request import HTTPXRequest
+
+    accepted = []
+
+    async def telegram(request):
+        assert request.url.path.endswith('/sendMessage')
+        accepted.append('applied')
+        raise httpx.ReadTimeout('response lost after receipt', request=request)
+
+    async def run():
+        req = HTTPXRequest(httpx_kwargs={'transport': httpx.MockTransport(telegram)})
+        poll = HTTPXRequest(httpx_kwargs={'transport': httpx.MockTransport(telegram)})
+        bot = Bot(token='123:TEST_ONLY', request=req, get_updates_request=poll)
+        async def send(text, **kwargs):
+            return await bot.send_message(1, text, **kwargs)
+        try:
+            with pytest.raises(TimedOut):
+                await reply_text(SimpleNamespace(reply_text=send), 'test')
+        finally:
+            await req.shutdown()
+            await poll.shutdown()
+
+    with caplog.at_level(logging.WARNING, logger='socrat-bot'):
+        asyncio.run(run())
+    assert accepted == ['applied']
+    assert [r.outcome for r in caplog.records if hasattr(r, 'outcome')] == ['unconfirmed']
