@@ -187,7 +187,8 @@ def annotate_card(
                 if "<i>" in text:
                     text = text[: text.rfind("<i>")].rstrip()
                 text += "\n\n" + mute
-            jobs.append(enqueue_locked_card(db, incident, state, text=text))
+            jobs.append(enqueue_locked_card(db, incident, state, text=text,
+                                            pressed=bool(mute and state.chat_id == preferred_chat)))
             card = applied_cards.get(state.chat_id)
             if card and card.generation == incident.generation:
                 card.text = marker(text, incident)
@@ -195,6 +196,11 @@ def annotate_card(
         return [
             s.chat_id for s in states if chat_id is None or s.chat_id == chat_id
         ], jobs
+
+
+def _job_done(id_):
+    with session() as db:
+        return db.get(AlertOutbox, id_).done
 
 
 async def dispatch_jobs(jobs, *, wait_seconds=25):
@@ -211,10 +217,8 @@ async def dispatch_jobs(jobs, *, wait_seconds=25):
                     # Do not obscure errors or spin on ambiguous Telegram timeouts.
                     remaining.pop(id_, None)
                     continue
-            with session() as db:
-                row = db.get(AlertOutbox, id_)
-                if row.done:
-                    remaining.pop(id_, None)
+            if await asyncio.to_thread(_job_done, id_):
+                remaining.pop(id_, None)
         if remaining and not progress:
             if time.monotonic() >= deadline:
                 return

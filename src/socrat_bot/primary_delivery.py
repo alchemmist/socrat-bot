@@ -96,6 +96,12 @@ def adapt(db, incident, card, existing, method, body, snapshot):
         if incident.graph_generation == incident.generation
         else None
     )
+    # The pressed copy first updates its *current* Telegram representation. The
+    # fenced finish transaction enqueues graph reconciliation after acceptance.
+    if existing and snapshot.get("_pressed"):
+        if desired and desired != card.graph_capture:
+            snapshot["_deferred_graph"] = True
+        desired = None
     capture = (
         db.get(GraphSnapshot, desired, options=[defer(GraphSnapshot.png)])
         if desired
@@ -106,7 +112,7 @@ def adapt(db, incident, card, existing, method, body, snapshot):
         capture
         if capture and capture.png
         else (
-            db.get(GraphSnapshot, card.graph_capture)
+            db.get(GraphSnapshot, card.graph_capture, options=[defer(GraphSnapshot.png)])
             if is_photo and card.graph_capture
             else None
         )

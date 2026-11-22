@@ -51,7 +51,7 @@ def test_sqlite_populated_upstream_desired_fence_upgrade_and_downgrade(tmp_path)
     with engine.connect() as connection:
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0024_resend_claims"
+            == "0025_pressed_operation"
         )
     engine.dispose()
 

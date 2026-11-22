@@ -821,3 +821,39 @@ def test_delivery_diagnostic_failure_preserves_result_and_cleans_heartbeat(monke
     asyncio.run(run())
     with session() as db:
         assert db.get(TelegramCard, ("graph", 1)).message_id is not None
+
+
+@pytest.mark.parametrize('photo', [False, True])
+def test_pressed_copy_preempts_unsent_graph_then_reconciles(monkeypatch, photo):
+    from socrat_bot.models import Incident
+
+    calls = mock_transport(monkeypatch)
+    seed()
+    if not photo:
+        with session() as db:
+            db.get(Incident, 'graph').graph_capture = None
+    deliver()
+    with session() as db:
+        db.add(GraphSnapshot(id='b' * 64, png=PNG + b'new'))
+        db.get(Incident, 'graph').graph_capture = 'b' * 64
+    _, graph_jobs = annotate_card('graph', note='graph ready')
+    upload = prepare_work(graph_jobs[0])
+    assert upload[1] == 'editMessageMedia'
+    _, jobs = annotate_card('graph', mute='<i>Muted 15m</i>', preferred_chat=1)
+    # Simulate a queue worker that prepared media before the click committed.
+    assert not asyncio.run(_deliver_work(upload))
+    assert len(calls) == 1
+    work = prepare_work(jobs[0])
+    assert work[1] == ('editMessageCaption' if photo else 'editMessageText')
+    assert work[2]['message_id'] == 101
+    assert '<i>Muted 15m</i>' in work[2]['text']
+    assert work[2]['reply_markup'] == {'inline_keyboard': []}
+    assert '_graph_data' not in work[2]
+    assert asyncio.run(_deliver_work(work))
+    follow = deliver()
+    assert follow[1] == 'editMessageMedia'
+    assert '<i>Muted 15m</i>' in follow[2]['text']
+    assert follow[2]['reply_markup'] == {'inline_keyboard': []}
+    assert follow[2]['message_id'] == 101
+    with session() as db:
+        assert db.get(TelegramCard, ('graph', 1)).graph_capture == 'b' * 64

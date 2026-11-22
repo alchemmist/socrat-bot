@@ -11,6 +11,7 @@ import httpx
 from sqlalchemy import BigInteger, and_, cast, or_, select, update
 from sqlalchemy.orm import Session
 
+from socrat_bot import callback_trace
 from socrat_bot.db import session
 from socrat_bot.logic import alert_levels, audit, create_action
 from socrat_bot.models import (
@@ -75,6 +76,14 @@ def insert_once(db, model, values):
 
 
 def delivery_state(db, key, chat_id, generation):
+    locked = (
+        select(CardDelivery)
+        .where(CardDelivery.key == key, CardDelivery.chat_id == chat_id)
+        .with_for_update()
+    )
+    state = db.scalar(locked)
+    if state is not None:
+        return state
     card = db.get(TelegramCard, (key, chat_id))
     insert_once(
         db,
@@ -102,11 +111,7 @@ def delivery_state(db, key, chat_id, generation):
             "note": card.note if card else None,
         },
     )
-    return db.scalar(
-        select(CardDelivery)
-        .where(CardDelivery.key == key, CardDelivery.chat_id == chat_id)
-        .with_for_update()
-    )
+    return db.scalar(locked)
 
 
 def enqueue_card(db, incident, chat_id, text=None, source=None):
@@ -116,16 +121,19 @@ def enqueue_card(db, incident, chat_id, text=None, source=None):
     return job
 
 
-def enqueue_locked_card(db, incident, state, *, text=None, source=None):
+def enqueue_locked_card(db, incident, state, *, text=None, source=None, pressed=False):
     """Stage one outbox job using a delivery row already locked by this session."""
     chat_id = state.chat_id
     if state.generation != incident.generation:
         state.generation = incident.generation
+        state.pressed_operation = None
         state.text = None
         state.buttons = []
     if text is not None:
         state.text = text
     state.revision += 1
+    if pressed:
+        state.pressed_operation = callback_trace.operation.get() or uuid.uuid4().hex
     row = AlertOutbox(
         id=uuid.uuid4(),
         payload={
@@ -186,6 +194,7 @@ def route(db: Session, key: str, firing: bool) -> list[int]:
         for user in people:
             state = delivery_state(db, key, user.telegram_id, incident.generation)
             state.generation = incident.generation
+            state.pressed_operation = None
             state.text = None
             # The initial intent and incident commit together, before any HTTP.
             enqueue_card(db, incident, user.telegram_id)
@@ -289,6 +298,7 @@ def escalate(
         state = delivery_state(db, incident.key, user.telegram_id, generation)
         if state.generation != generation:
             state.generation = generation
+            state.pressed_operation = None
             state.text = None
             state.buttons = []
         if not existing and not state.text:
@@ -325,7 +335,8 @@ def escalate(
                 cloned.append({**spec, "callback_data": f"act:{action.id}"})
             state.buttons = cloned
 
-        job = enqueue_locked_card(db, incident, state, source=template.chat_id)
+        job = enqueue_locked_card(db, incident, state, source=template.chat_id,
+                                  pressed=user.telegram_id == actor)
         if pressed_jobs is not None and user.telegram_id == actor:
             pressed_jobs.append(job)
         if existing and user.admin_level == destination and user.telegram_id != actor:
@@ -442,7 +453,6 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             )
         incident = db.get(Incident, p["key"])
         card = db.get(TelegramCard, (p["key"], p["chat_id"]), populate_existing=True)
-        user = db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
         if (
             not incident
             or (incident.generation != p["generation"] and p["kind"] != "spi")
@@ -460,6 +470,8 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             discard()
             return None
         p["_level"], p["_status"] = incident.level, incident.status
+        user = (db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
+                if not existing or p["kind"] == "notice" else None)
         if not existing and (not user or not user.alerts_active):
             discard()
             return None
@@ -600,6 +612,8 @@ def prepare_work(work_id: uuid.UUID | None = None) -> Work | None:
             "parse_mode": "HTML",
             "reply_markup": {"inline_keyboard": rows},
         }
+        if existing and state.pressed_operation and incident.generation == p["generation"]:
+            p["_pressed"] = state.pressed_operation
         if existing:
             body["message_id"] = card.message_id
         method, body = adapt_primary(db, incident, card, existing, "editMessageText" if existing else "sendMessage", body, p)
@@ -632,6 +646,13 @@ def authorize_http(work: Work) -> bool:
             .with_for_update()
         )
         if state.lease_owner != uuid.UUID(p["_owner"]):
+            return False
+        state.lease_until = utcnow() + timedelta(seconds=60)
+        if (_method == "editMessageMedia" and state.pressed_operation
+                and state.pressed_operation != p.get("_pressed")):
+            # Prepared but not sent: rebuild using the just-committed button state.
+            db.get(AlertOutbox, id_).available_at = utcnow()
+            state.lease_owner = state.lease_until = None
             return False
         if _method in ("sendMessage", "sendPhoto"):
             user = db.scalar(select(User).where(User.telegram_id == p["chat_id"]))
@@ -679,9 +700,7 @@ async def _deliver_work(work: Work) -> bool:
     definite_rejection = False
     outcome = "uncertain"
     try:
-        if not await asyncio.to_thread(renew_lease, p) or not await asyncio.to_thread(
-            authorize_http, work
-        ):
+        if not await asyncio.to_thread(authorize_http, work):
             outcome = "fenced"
             return False
         async with httpx.AsyncClient(timeout=20) as client:
@@ -692,6 +711,9 @@ async def _deliver_work(work: Work) -> bool:
                 definite_rejection = True
                 raise RuntimeError("Telegram delivery rejected")
 
+        if p.get("_pressed"):
+            logging.getLogger("socrat-bot").info("action callback", extra={
+                "operation": p["_pressed"], "stage": "pressed_edit_accepted"})
         accepted = await asyncio.to_thread(finish_work, work, data)
         outcome = "accepted" if accepted else "fenced"
         return accepted
@@ -807,8 +829,11 @@ def finish_work(work: Work, data: dict) -> bool:
             )
         state.message_generation = p["generation"]
         state.delivered_revision = p["_revision"]
+        if state.pressed_operation == p.get("_pressed"):
+            state.pressed_operation = None
         if (
-            state.revision != p["_revision"]
+            p.get("_deferred_graph")
+            or state.revision != p["_revision"]
             or incident.level != p["_level"]
             or incident.status != p["_status"]
         ):

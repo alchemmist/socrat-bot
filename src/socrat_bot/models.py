@@ -240,6 +240,7 @@ class CardDelivery(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     buttons: Mapped[list] = mapped_column(JSONType, default=list)
     link_revision: Mapped[int] = mapped_column(Integer, default=0)
+    pressed_operation: Mapped[str | None] = mapped_column(String(32), nullable=True)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

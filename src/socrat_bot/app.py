@@ -886,7 +886,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # A silence request may finish after this incident has resolved/refired.
             # Never carry an old callback's footer/buttons into the new generation.
             return
-        await dispatch_jobs(jobs)
+        # Other copies are already durable. A busy pressed copy must not wait
+        # while this handler uploads a graph for a different recipient.
+        await dispatch_jobs(jobs[:1])
         return
     for chat_id, message_id in copies:
         try:
