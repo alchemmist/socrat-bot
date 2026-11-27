@@ -62,7 +62,7 @@ def credential(scope):
         with session() as db:
             row = db.scalar(
                 select(ApiGrant).where(
-                    ApiGrant.digest == digest, ApiGrant.expires > int(time.time())
+                    ApiGrant.digest == digest, ((ApiGrant.expires == 0) | (ApiGrant.expires > int(time.time())))
                 )
             )
             if not row:
@@ -98,7 +98,7 @@ class Issue(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     scopes: set[str] = Field(min_length=1, max_length=10)
     chats: set[int] = Field(default_factory=set, max_length=100)
-    days: int = Field(default=30, ge=1, le=365)
+    days: int | None = Field(default=30, ge=1, le=365)
 
 
 def install(app):
@@ -166,21 +166,15 @@ def install(app):
                     "name": r.name,
                     "scopes": r.scopes,
                     "chats": r.chats,
-                    "expires": r.expires,
+                    "expires": r.expires or None,
                 }
                 for r in db.scalars(select(ApiGrant).order_by(ApiGrant.name))
             ]
 
     @app.post("/admin/tokens", dependencies=[Depends(mutation)], status_code=201)
     def issue(body: Issue, response: Response):
-        if body.scopes - SCOPES or (
-            "messages:send" in body.scopes
-            and "messages:advanced" not in body.scopes
-            and not body.chats
-        ):
-            raise HTTPException(
-                422, "choose known scopes and destination chats for plain send"
-            )
+        if body.scopes - SCOPES:
+            raise HTTPException(422, "choose known scopes")
         if body.chats and body.scopes != {"messages:send"}:
             raise HTTPException(
                 422, "destination restrictions apply only to plain send"
@@ -195,7 +189,7 @@ def install(app):
                     name=body.name,
                     scopes=sorted(body.scopes),
                     chats=sorted(body.chats),
-                    expires=int(time.time()) + 86400 * body.days,
+                    expires=int(time.time()) + 86400 * body.days if body.days is not None else 0,
                 )
             )
         response.headers["Cache-Control"] = "no-store"

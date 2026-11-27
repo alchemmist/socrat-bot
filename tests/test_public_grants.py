@@ -32,6 +32,24 @@ def test_grant_lifecycle_and_boundaries(monkeypatch, tmp_path):
         == 401
     )
     assert c.get("/api/v1/cards", headers=auth).status_code == 403
+    import httpx
+
+    async def fake_post(self, url, *, json):
+        assert url.endswith('/sendMessage')
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test")
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    unrestricted = c.post("/admin/tokens", auth=admin, headers=h,
+                          json={"name": "alerts", "scopes": ["messages:send"], "days": None})
+    assert unrestricted.status_code == 201
+    assert next(row for row in c.get("/admin/tokens", auth=admin).json() if row["name"] == "alerts")["expires"] is None
+    unrestricted_auth = {"Authorization": "Bearer " + unrestricted.json()["token"]}
+    for chat in (12, 13):
+        assert c.post("/api/v1/messages", headers=unrestricted_auth,
+                      json={"chat_id": chat, "text": "test"}).status_code == 200
+    assert c.post("/api/v1/messages", headers=unrestricted_auth,
+                  json={"chat_id": 13, "text": "test", "actions": [{}]}).status_code == 403
     for payload in [
         {"chat_id": 13, "text": "test"},
         {"chat_id": 12, "text": "test", "actions": [{}]},

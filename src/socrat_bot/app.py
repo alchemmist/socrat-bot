@@ -1118,8 +1118,8 @@ async def post_message(body: OutMessage, x_internal_token = Depends(credential("
     ):
         raise HTTPException(403, "destination-restricted grant cannot use global capabilities")
     if isinstance(x_internal_token, Grant) and "messages:advanced" not in x_internal_token.scopes:
-        if body.chat_id not in x_internal_token.chats or body.actions or body.alerts or body.card or body.images or body.parse_mode or body.alert is not None:
-            raise HTTPException(403, "plain send to an allowed chat only")
+        if body.actions or body.alerts or body.card or body.images or body.parse_mode or body.alert is not None:
+            raise HTTPException(403, "plain text messages only")
     if len(body.alerts) > 1:
         raise HTTPException(status_code=400, detail="one alert per message")
     try:
