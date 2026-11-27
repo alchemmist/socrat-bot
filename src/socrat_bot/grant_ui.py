@@ -13,7 +13,7 @@ def page(scopes):
 <form id="issue"><label>Название <input name="name" required maxlength="80"></label><label>Срок, дней <input name="days" type="number" min="1" max="365" value="30" required></label>
 <fieldset><legend>Права</legend>"""
         + choices
-        + """</fieldset><label>ID чатов через запятую (для обычной отправки) <input name="chats"></label>
+        + """</fieldset><label>ID чатов через запятую (для обычной отправки) <input name="chats" title="Целые ID через запятую, например 12,-34" pattern=" *-?[0-9]+ *(, *-?[0-9]+ *)*"></label>
 <p>Для внешнего клиента выберите только messages:send и его чаты. Остальные права действуют глобально; messages:advanced разрешает карточки и действия.</p><button>Выдать токен</button></form>
 <pre id="result" role="status"></pre><h2>Выданные токены</h2><section id="list"></section>
 <script>
