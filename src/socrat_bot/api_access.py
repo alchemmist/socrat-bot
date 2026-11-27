@@ -16,6 +16,10 @@ from sqlalchemy import select
 from .db import session
 from .models import ApiGrant
 
+TOKEN_PREFIX = "sb1_"
+TOKEN_BYTES = 32
+TOKEN_LENGTH = len(TOKEN_PREFIX) + (TOKEN_BYTES * 8 + 5) // 6
+
 SCOPES = {
     "messages:send",
     "messages:advanced",
@@ -47,8 +51,8 @@ def credential(scope):
             return request.headers.get("x-internal-token")
         if (
             not auth
-            or not auth.credentials.startswith("sb1_")
-            or len(auth.credentials) != 47
+            or not auth.credentials.startswith(TOKEN_PREFIX)
+            or len(auth.credentials) != TOKEN_LENGTH
         ):
             raise HTTPException(401, "invalid bearer")
         digest = hashlib.sha256(auth.credentials.encode()).hexdigest()
@@ -141,7 +145,7 @@ def install(app):
             raise HTTPException(
                 422, "destination restrictions apply only to plain send"
             )
-        secret = "sb1_" + secrets.token_urlsafe(32)
+        secret = TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES)
         id_ = uuid.uuid4().hex
         with session() as db:
             db.add(
