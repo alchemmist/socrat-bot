@@ -2,6 +2,8 @@
 
 Control plane for the Socrat homelab cluster. One image, three processes.
 
+[Token console](https://bot.socrat.alchemmist.xyz/) · [Public API and permissions](docs/public-api.md) · [Socrat Wiki](https://wiki.socrat.alchemmist.xyz/platform/socrat-bot/)
+
 ## Processes
 
 - `python -m socrat_bot` — Telegram bot and HTTP API for the control plane. This command is the image default; the process listens on port 8080.
@@ -20,7 +22,9 @@ Bot:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `TELEGRAM_OWNER_ID`
-- `INTERNAL_TOKEN`
+- `BOT_OIDC_SECRET` (Authentik client secret for the operator console)
+- `BOT_DISABLE_LEGACY_API` (`true` in production)
+- `INTERNAL_TOKEN` (not a credential for the public API)
 - `ALERTMANAGER_URL`
 - `BROADCAST_PAUSE_SECONDS`
 - `XUI_UPDATER_URL`
@@ -53,7 +57,7 @@ Image publish in GitHub Actions uses the secrets `HARBOR_USERNAME`, `HARBOR_PASS
 
 ## Alert cards
 
-`POST /v1/messages` sends one card. An Alertmanager alert is the `alert` object (`status`, `labels`, `annotations`). The bot keeps one Telegram message per object: alert name plus pod, workload, or node. A cluster alert with no object is keyed by the alert name only. Repeats edit that message. `resolved` updates the same message, adds the word Resolved, and removes the mute buttons. The next firing after that is a new message.
+`POST /api/v1/messages` sends one card. An Alertmanager alert is the `alert` object (`status`, `labels`, `annotations`). The bot keeps one Telegram message per object: alert name plus pod, workload, or node. A cluster alert with no object is keyed by the alert name only. Repeats edit that message. `resolved` updates the same message, adds the word Resolved, and removes the mute buttons. The next firing after that is a new message.
 
 Links come from a provider registry in `socrat_bot.cards`, not from Prometheus annotations. The alert default is Alert, then the node dashboard and Rancher when the subject is a node, Rancher for a pod or an explicitly labeled workload, Loki logs, and Argo CD when the namespace maps to one Application. At most four of those. A trace id adds Traces (Tempo) only when the caller asks for the `traces` provider, or when that provider is included in `card.links`.
 
@@ -77,8 +81,8 @@ A non-alert card uses the same renderer:
 A later workflow can attach a GitHub issue to every copy of a card:
 
 ```
-POST /v1/cards/links
-X-Internal-Token: ...
+POST /api/v1/cards/links
+Authorization: Bearer TOKEN
 {"alert": {"labels": {"alertname": "TargetDown", "namespace": "lms"}}, "url": "https://github.com/org/repo/issues/4"}
 ```
 
@@ -95,7 +99,7 @@ The owner opens `/users` and picks VPN, Alerts, LLM, or Cluster. The message is 
 
 The owner starts with `/mailing`, chooses **VPN**, **Alerts**, **LLM** or **Cluster**, then sends the message text (including native styles/hidden links). Composition is durable across bot restarts. A new `/mailing` cancels an unfinished group/text draft, not scheduled mailings. **Cancel** discards a group/text draft. `/mailing TEXT` remains a shortcut: text is saved, but a group must still be explicitly chosen before preview/scheduling.
 
-The selected group is persisted in `Broadcast.audience_group`, shown in controls, delivery summaries and mailing history. Recipients are evaluated from that group's current interests at send time, as before for VPN: VPN, LLM and Cluster require their selected interest; Alerts additionally requires owner approval. Joining/leaving another group never changes this mailing's target. Existing mailings migrate to VPN; no existing user is auto-opted into LLM. The internal plaintext `POST /v1/broadcasts` keeps its legacy VPN default. Invalid/missing groups never fall back to another audience. Editing still touches ONLY saved original recipient copies, regardless of later interest changes, with no replacement sends.
+The selected group is persisted in `Broadcast.audience_group`, shown in controls, delivery summaries and mailing history. Recipients are evaluated from that group's current interests at send time, as before for VPN: VPN, LLM and Cluster require their selected interest; Alerts additionally requires owner approval. Joining/leaving another group never changes this mailing's target. Existing mailings migrate to VPN; no existing user is auto-opted into LLM. The plain-text `POST /api/v1/broadcasts` keeps its legacy VPN default. Invalid/missing groups never fall back to another audience. Editing still touches ONLY saved original recipient copies, regardless of later interest changes, with no replacement sends.
 
 After text preview, the bot offers the next seven days and Now. After a day, it offers every hour from 08:00 through 22:00 in `Europe/Moscow`. Hours that already passed today are hidden. Now sends immediately. A scheduled mailing is sent when that time arrives. The check runs about every 15 seconds. `BROADCAST_TZ` overrides the zone.
 
@@ -162,7 +166,7 @@ detect newer alert text or annotations received in flight; the worker preserves
 that desired state and durably repairs the old snapshot. Two normal successful
 jobs for a new recipient cannot both send a main card.
 
-`POST /v1/messages` still dispatches synchronously and returns `copies`/message
+`POST /api/v1/messages` still dispatches synchronously and returns `copies`/message
 IDs for completed copies (partial success is retained). With admitted recipients
 but no completed delivery, it returns 502 and retains durable retry work rather
 than returning a misleading empty success. An ambiguous transport failure retains
@@ -179,7 +183,7 @@ send can cause a duplicate on retry (Telegram has no idempotency key). A process
 crash after Telegram acceptance but before successful persistence, or loss/expiry
 of ownership during an uncertain request, has the same at-least-once caveat.
 
-`GET /v1/audience` includes `admin_level` and `receive_level` for each person;
+`GET /api/v1/audience` includes `admin_level` and `receive_level` for each person;
 card listing/item metadata includes `generation`, `level`, `escalation_history`.
 
 ### Escalation tests
@@ -214,7 +218,7 @@ A terminal resolved episode never re-fires or replaces its message, even if a
 late firing webhook arrives; a distinct episode digest starts a distinct incident.
 Episode cards use the same approved audience rules (never a fallback `chat_id`).
 
-`POST /v1/cards/links` preserves `expected_copies` identity validation and monotonic
+`POST /api/v1/cards/links` preserves `expected_copies` identity validation and monotonic
 `revision` semantics. The accepted `desired_link_revision`/`desired_spi_url` fence
 commits **before HTTP**, even when all Telegram edits fail. Stale revisions or a
 same-revision different URL receive 409 without an edit. `link_revision` and
@@ -303,7 +307,7 @@ view contains at most the latest three, with escaped text previews in code block
 Long previews are visibly truncated rather than exceeding Telegram's message limit.
 Historical entries without saved IDs are hidden, not made editable by the UI.
 
-### Optional alert images (internal API)
+### Optional alert images (public API)
 
 The caller generates/selects screenshots; the bot does not render Grafana, accept
 image URLs, fetch screenshots, or need Grafana/browser credentials. Attach to
@@ -313,8 +317,8 @@ image URLs, fetch screenshots, or need Grafana/browser credentials. Attach to
 import base64
 import requests
 
-requests.post("http://socrat-bot:8080/v1/messages", headers={
-    "X-Internal-Token": internal_token,
+requests.post("https://bot.socrat.alchemmist.xyz/api/v1/messages", headers={
+    "Authorization": f"Bearer {client_token}",
 }, json={
     "chat_id": 123,
     "card": {"key": "disk/example", "title": "Disk almost full"},

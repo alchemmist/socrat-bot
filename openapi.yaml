@@ -1,23 +1,20 @@
 # Native gateway photos may add a digest-verified Chart link; nodes provider label is Node.
-# Internal contract for processes that integrate with Socrat Bot.
+# HTTP contract for processes that integrate with Socrat Bot.
 openapi: 3.0.3
 info:
   title: Socrat Bot
   version: 1.0.0
   description: |
-    Внутренний API бота Socrat. Через него другие процессы кластера
+    HTTPS API бота Socrat. Через него другие процессы кластера
     отправляют карточки алертов, дописывают ссылки и ставят служебные задачи.
-    Публично доступен только webhook Telegram.
+    Клиентам нужен отдельный Bearer-токен; webhook Telegram использует другой заголовок.
     /unsubscribe и кнопка Unsubscribe отключают доставку, сохраняя одобрение владельца.
     Повторная подписка через /start не требует нового одобрения и не рассылает старые алерты.
     Если задан ACTION_WEBHOOK_URL, бот после кнопки шлёт POST: vpn.opt_in, alerts.approved или alert.muted. Без адреса события наружу не уходят.
 servers:
-  - url: http://socrat-bot.socrat-bot.svc:8080
-    description: Внутренний адрес бота в кластере
   - url: https://bot.socrat.alchemmist.xyz
-    description: Публичный ingress, только /telegram/webhook
 security:
-  - internalToken: []
+  - bearerToken: []
 tags:
   - name: alerts
     description: Карточки алертов и ссылки на них
@@ -30,7 +27,7 @@ tags:
   - name: health
     description: Проверка процесса
 paths:
-  /v1/messages:
+  /api/v1/messages:
     post:
       tags: [alerts, messages]
       operationId: postMessage
@@ -94,8 +91,10 @@ paths:
         "400":
           description: В запросе больше одного алерта или нет текста
         "401":
-          description: Нет или неверный X-Internal-Token
-  /v1/cards/links:
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
+  /api/v1/cards/links:
     post:
       tags: [alerts]
       operationId: addCardLink
@@ -122,12 +121,14 @@ paths:
         "400":
           description: Не переданы ни key, ни alert
         "401":
-          description: Нет или неверный X-Internal-Token
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
         "404":
           description: Карточка с таким ключом ещё не отправлялась
         "409":
           description: У карточки ещё не сохранён текст, повторите после следующего обновления алерта
-  /v1/messages/{message_id}:
+  /api/v1/messages/{message_id}:
     patch:
       tags: [messages]
       operationId: patchMessage
@@ -154,8 +155,10 @@ paths:
         "200":
           description: Сообщение изменено
         "401":
-          description: Нет или неверный X-Internal-Token
-  /v1/link-codes:
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
+  /api/v1/link-codes:
     post:
       tags: [vpn]
       operationId: createLinkCode
@@ -188,8 +191,10 @@ paths:
                     type: string
                     example: link_ab12
         "401":
-          description: Нет или неверный X-Internal-Token
-  /v1/broadcasts:
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
+  /api/v1/broadcasts:
     post:
       tags: [messages]
       operationId: createBroadcast
@@ -212,8 +217,10 @@ paths:
         "200":
           description: Черновик создан и показан владельцу
         "401":
-          description: Нет или неверный X-Internal-Token
-  /v1/actions/{action_id}:
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
+  /api/v1/actions/{action_id}:
     get:
       tags: [messages]
       operationId: getAction
@@ -240,7 +247,9 @@ paths:
                   result:
                     type: object
         "401":
-          description: Нет или неверный X-Internal-Token
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
         "404":
           description: Действие не найдено
   /telegram/webhook:
@@ -248,7 +257,7 @@ paths:
       tags: [telegram]
       operationId: telegramWebhook
       summary: Принять обновление Telegram
-      description: Единственный публичный метод. Его вызывает Telegram, не внутренние workflow.
+      description: Этот метод вызывает Telegram; клиентский Bearer-токен здесь не используется.
       security:
         - telegramSecret: []
       servers:
@@ -265,7 +274,7 @@ paths:
           description: Обновление принято
         "401":
           description: Секрет webhook не совпал
-  /v1/cards:
+  /api/v1/cards:
     get:
       tags:
       - alerts
@@ -304,14 +313,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/CardList'
         '401':
-          description: Нет или неверный X-Internal-Token
-  /v1/cards/item:
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
+  /api/v1/cards/item:
     get:
       tags: [alerts]
       operationId: getCard
       summary: Одна карточка по ключу
       description: |
-        Ключ берётся из списка карточек или из ответа POST /v1/messages.
+        Ключ берётся из списка карточек или из ответа POST /api/v1/messages.
         В ключе бывают слэши, поэтому он передаётся параметром key, а не частью пути.
         Возвращает и открытую, и уже закрытую карточку.
       parameters:
@@ -328,10 +339,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/CardSummary"
         "401":
-          description: Нет или неверный X-Internal-Token
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
         "404":
           description: Карточка с таким ключом не отправлялась
-  /v1/cards/notes:
+  /api/v1/cards/notes:
     post:
       tags: [alerts]
       operationId: addCardNote
@@ -355,12 +368,14 @@ paths:
         "400":
           description: Нет ключа или заметка пустая либо слишком длинная
         "401":
-          description: Нет или неверный X-Internal-Token
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
         "404":
           description: Карточка ещё не отправлялась
         "409":
           description: У карточки ещё не сохранён текст
-  /v1/audience:
+  /api/v1/audience:
     get:
       tags: [alerts, vpn]
       operationId: getAudience
@@ -376,10 +391,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/Audience"
         "401":
-          description: Нет или неверный X-Internal-Token
+          description: Bearer-токен отсутствует, недействителен, отозван или истёк
+        "403":
+          description: Нет нужного разрешения или доступа к чату
   /healthz:
     get:
       tags: [health]
+      servers:
+        - url: http://socrat-bot.socrat-bot.svc:8080
+          description: Только внутри кластера
       operationId: health
       summary: Процесс жив
       security: []
@@ -395,10 +415,9 @@ paths:
                     type: boolean
 components:
   securitySchemes:
-    internalToken:
-      type: apiKey
-      in: header
-      name: X-Internal-Token
+    bearerToken:
+      type: http
+      scheme: bearer
     telegramSecret:
       type: apiKey
       in: header
