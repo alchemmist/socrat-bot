@@ -285,3 +285,13 @@ class ResendClaim(Base):
     __tablename__ = "resend_claims"
     broadcast_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+
+class ApiGrant(Base):
+    __tablename__ = 'api_grants'
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), unique=True)
+    name: Mapped[str] = mapped_column(String(80))
+    scopes: Mapped[list] = mapped_column(JSONType)
+    chats: Mapped[list] = mapped_column(JSONType)
+    expires: Mapped[int] = mapped_column(BigInteger)

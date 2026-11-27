@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import timezone, datetime
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -15,6 +15,7 @@ from sqlalchemy import select, update as sql_update
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 
+from socrat_bot.api_access import Grant, credential, install
 from socrat_bot.mute_transport import mute_minutes
 from socrat_bot.telegram_reply import accepted_start, reply_text
 
@@ -147,6 +148,8 @@ def schedule_action_event(event: dict) -> None:
 
 
 def require_internal(token: str | None) -> None:
+    if isinstance(token, Grant):
+        return
     expected = os.environ.get("INTERNAL_TOKEN", "")
     if not expected or token != expected:
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -1053,6 +1056,7 @@ async def lifespan(app: FastAPI):
 
 
 api = FastAPI(lifespan=lifespan)
+install(api)
 api.add_middleware(OperationalEvents, component="bot")
 
 
@@ -1105,9 +1109,13 @@ async def _run_update(payload: dict) -> None:
             callback_trace.operation.reset(token)
 
 
+@api.post("/api/v1/messages")
 @api.post("/v1/messages")
-async def post_message(body: OutMessage, x_internal_token: str | None = Header(default=None)):
+async def post_message(body: OutMessage, x_internal_token = Depends(credential("messages:send"))):
     require_internal(x_internal_token)
+    if isinstance(x_internal_token, Grant) and "messages:advanced" not in x_internal_token.scopes:
+        if body.chat_id not in x_internal_token.chats or body.actions or body.alerts or body.card or body.images or body.parse_mode or body.alert is not None:
+            raise HTTPException(403, "plain send to an allowed chat only")
     if len(body.alerts) > 1:
         raise HTTPException(status_code=400, detail="one alert per message")
     try:
@@ -1181,8 +1189,9 @@ class CardLinkIn(BaseModel):
     revision: int | None = None
 
 
+@api.post("/api/v1/cards/links")
 @api.post("/v1/cards/links")
-async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(default=None)):
+async def add_card_link(body: CardLinkIn, x_internal_token = Depends(credential("cards:link"))):
     require_internal(x_internal_token)
     key = body.key or (build_alert(body.alert).key if body.alert else None)
     if not key:
@@ -1195,8 +1204,9 @@ async def add_card_link(body: CardLinkIn, x_internal_token: str | None = Header(
 
 
 
+@api.get("/api/v1/cards/item")
 @api.get("/v1/cards/item")
-def get_card_item(key: str, x_internal_token: str | None = Header(default=None)):
+def get_card_item(key: str, x_internal_token = Depends(credential("cards:read"))):
     require_internal(x_internal_token)
     if not key:
         raise HTTPException(status_code=400, detail="key required")
@@ -1207,8 +1217,9 @@ def get_card_item(key: str, x_internal_token: str | None = Header(default=None))
     return found
 
 
+@api.get("/api/v1/cards")
 @api.get("/v1/cards")
-def get_cards(status: str = "firing", episode: str | None = None, x_internal_token: str | None = Header(default=None)):
+def get_cards(status: str = "firing", episode: str | None = None, x_internal_token = Depends(credential("cards:read"))):
     require_internal(x_internal_token)
     if status not in {"firing", "resolved", "all"}:
         raise HTTPException(status_code=400, detail="status must be firing, resolved or all")
@@ -1224,8 +1235,9 @@ def get_cards(status: str = "firing", episode: str | None = None, x_internal_tok
     return {"cards":cards}
 
 
+@api.get("/api/v1/audience")
 @api.get("/v1/audience")
-def get_audience(x_internal_token: str | None = Header(default=None)):
+def get_audience(x_internal_token = Depends(credential("audience:read"))):
     require_internal(x_internal_token)
     with session() as db:
         return audience(db)
@@ -1237,8 +1249,9 @@ class CardNoteIn(BaseModel):
     alert: dict | None = None
 
 
+@api.post("/api/v1/cards/notes")
 @api.post("/v1/cards/notes")
-async def add_card_note(body: CardNoteIn, x_internal_token: str | None = Header(default=None)):
+async def add_card_note(body: CardNoteIn, x_internal_token = Depends(credential("cards:note"))):
     require_internal(x_internal_token)
     if body.key:
         key = body.key
@@ -1262,12 +1275,13 @@ async def add_card_note(body: CardNoteIn, x_internal_token: str | None = Header(
     return {"key": key, "updated": await asyncio.to_thread(delivered_copies, key, recipients, jobs)}
 
 
+@api.patch("/api/v1/messages/{message_id}")
 @api.patch("/v1/messages/{message_id}")
 async def patch_message(
     message_id: int,
     body: PatchMessage,
     chat_id: int,
-    x_internal_token: str | None = Header(default=None),
+    x_internal_token = Depends(credential("messages:edit")),
 ):
     require_internal(x_internal_token)
     with session() as db:
@@ -1295,8 +1309,9 @@ async def patch_message(
     return {"id": message_id}
 
 
+@api.post("/api/v1/link-codes")
 @api.post("/v1/link-codes")
-def link_codes(body: LinkIn, x_internal_token: str | None = Header(default=None)):
+def link_codes(body: LinkIn, x_internal_token = Depends(credential("links:issue"))):
     require_internal(x_internal_token)
     from socrat_bot.logic import issue_link_code
 
@@ -1305,8 +1320,9 @@ def link_codes(body: LinkIn, x_internal_token: str | None = Header(default=None)
     return {"code": code, "start": f"link_{code}"}
 
 
+@api.post("/api/v1/broadcasts")
 @api.post("/v1/broadcasts")
-async def broadcasts(body: BroadcastIn, x_internal_token: str | None = Header(default=None)):
+async def broadcasts(body: BroadcastIn, x_internal_token = Depends(credential("broadcasts:send"))):
     require_internal(x_internal_token)
     with session() as db:
         row = Broadcast(text=body.text, status="preview", chat_id=body.chat_id)
@@ -1346,8 +1362,9 @@ async def broadcasts(body: BroadcastIn, x_internal_token: str | None = Header(de
     return {"id": str(broadcast_id), "message_id": message_id}
 
 
+@api.get("/api/v1/actions/{action_id}")
 @api.get("/v1/actions/{action_id}")
-def get_action(action_id: uuid.UUID, x_internal_token: str | None = Header(default=None)):
+def get_action(action_id: uuid.UUID, x_internal_token = Depends(credential("actions:read"))):
     require_internal(x_internal_token)
     with session() as db:
         row = db.get(Action, action_id)
