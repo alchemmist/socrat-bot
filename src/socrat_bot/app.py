@@ -1162,6 +1162,8 @@ async def post_message(body: OutMessage, x_internal_token = Depends(credential("
                 idempotency_key=item.get("idempotency_key") or str(uuid.uuid4()))
             action_ids.append(action.id)
             existing = existing or action.message_id
+            if existing and isinstance(x_internal_token, Grant) and "messages:edit" not in x_internal_token.scopes:
+                raise HTTPException(403, "action replay requires messages:edit")
             buttons.append((item.get("label") or action.type, f"act:{action.id}", int(item.get("row") or 0)))
     payload = {"chat_id": body.chat_id, "text": body.text}
     if body.parse_mode:
