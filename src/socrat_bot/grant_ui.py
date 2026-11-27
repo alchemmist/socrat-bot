@@ -9,7 +9,7 @@ def page(scopes):
     return (
         """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Socrat / API</title><style>:root{font:16px/1.5 monospace;color:#151515;background:white}body{max-width:55rem;margin:3rem auto;padding:0 1rem}fieldset,article{margin:1rem 0;padding:1rem;border:1px solid #aaa}label{display:block}button,input{font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
-<h1>Socrat / API</h1><p>Адрес: <code>/api/v1</code> · Authorization: Bearer TOKEN</p>
+<h1>Socrat / API</h1><button type="button" onclick="fetch('/admin/tokens/logout',{method:'POST',headers:{'X-Bot-Admin':'1'}}).then(r=>{if(r.ok)document.body.textContent='Сеанс консоли завершён.'})">Выйти из консоли</button><p>Адрес: <code>/api/v1</code> · Authorization: Bearer TOKEN</p>
 <form id="issue"><label>Название <input name="name" required maxlength="80"></label><label>Срок, дней <input name="days" type="number" min="1" max="365" value="30" required></label>
 <fieldset><legend>Права</legend>"""
         + choices

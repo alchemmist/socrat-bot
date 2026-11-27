@@ -16,7 +16,11 @@ def test_grant_lifecycle_and_boundaries(monkeypatch, tmp_path):
     admin = ("admin", "a" * 32)
     body = {"name": "phone", "scopes": ["messages:send"], "chats": [12]}
     h = {"X-Bot-Admin": "1"}
-    assert c.get("/").status_code == 401
+    from socrat_bot.api_access import admin as gate
+
+    monkeypatch.setenv("BOT_OIDC_SECRET", "x" * 48)
+    assert c.get("/admin/tokens", auth=admin).status_code == 401
+    monkeypatch.setitem(api.dependency_overrides, gate, lambda: None)
     assert c.post("/admin/tokens", auth=admin, json=body).status_code == 403
     r = c.post("/admin/tokens", auth=admin, headers=h, json=body)
     assert r.status_code == 201, r.text

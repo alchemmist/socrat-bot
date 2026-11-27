@@ -8,8 +8,11 @@ import uuid
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBearer
+from functools import lru_cache
+
+from .admin_oidc import OIDC, Rejected, Unavailable, STATE_COOKIE, cookie
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -71,25 +74,21 @@ def credential(scope):
     return check
 
 
-basic = HTTPBasic()
+@lru_cache(maxsize=1)
+def oidc():
+    try:
+        return OIDC("socrat-bot", os.environ["BOT_OIDC_SECRET"])
+    except (ValueError, KeyError):
+        raise HTTPException(503, "OIDC unavailable") from None
 
 
-def admin(credentials: HTTPBasicCredentials = Depends(basic)):
-    key = os.environ.get("BOT_API_ADMIN_SECRET", "")
-    if (
-        len(key) < 32
-        or credentials.username != "admin"
-        or not secrets.compare_digest(credentials.password.encode(), key.encode())
-    ):
-        raise HTTPException(
-            401,
-            "administrator required",
-            headers={"WWW-Authenticate": 'Basic realm="Bot API"'},
-        )
+def admin(request: Request):
+    if not oidc().authorized(request.headers):
+        raise HTTPException(401, "Authentik login required")
 
 
 def mutation(request: Request, _=Depends(admin)):
-    # Basic auth is ambient in browsers. Reject simple cross-origin requests;
+    # Session cookies are ambient in browsers. Reject simple cross-origin requests;
     # this app does not enable CORS. Never mint via GET or an HTML form POST.
     if request.headers.get("x-bot-admin") != "1":
         raise HTTPException(403, "management header required")
@@ -105,8 +104,49 @@ class Issue(BaseModel):
 def install(app):
     from .grant_ui import page
 
-    @app.get("/", dependencies=[Depends(admin)], include_in_schema=False)
-    def home():
+    @app.post("/admin/tokens/logout", dependencies=[Depends(mutation)], status_code=204)
+    def logout(request: Request):
+        return Response(
+            status_code=204,
+            headers={
+                "Set-Cookie": oidc().logout(request.headers),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/oauth/callback", include_in_schema=False)
+    def callback(request: Request):
+        try:
+            session_cookie = oidc().finish(request.url.query, request.headers)
+        except Rejected:
+            raise HTTPException(403, "Login not permitted") from None
+        except Unavailable:
+            raise HTTPException(503, "OIDC unavailable") from None
+        result = RedirectResponse(
+            "/",
+            status_code=303,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
+        result.headers.append("set-cookie", session_cookie)
+        result.headers.append("set-cookie", cookie(STATE_COOKIE))
+        return result
+
+    @app.get("/", include_in_schema=False)
+    def home(request: Request):
+        if not oidc().authorized(request.headers):
+            try:
+                target, state_cookie = oidc().begin()
+            except Unavailable:
+                raise HTTPException(503, "OIDC unavailable") from None
+            return RedirectResponse(
+                target,
+                status_code=302,
+                headers={
+                    "Set-Cookie": state_cookie,
+                    "Cache-Control": "no-store",
+                    "Referrer-Policy": "no-referrer",
+                },
+            )
         return HTMLResponse(
             page(SCOPES),
             headers={
