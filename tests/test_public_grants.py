@@ -47,3 +47,13 @@ def test_grant_lifecycle_and_boundaries(monkeypatch, tmp_path):
         ).status_code
         == 401
     )
+
+
+def test_console_language():
+    import re
+
+    from socrat_bot.grant_ui import page
+
+    html = page(["messages:send"])
+    assert '<html lang="en">' in html
+    assert not re.search(r"[\u0400-\u04ff]", html)
