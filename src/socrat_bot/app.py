@@ -1113,6 +1113,10 @@ async def _run_update(payload: dict) -> None:
 @api.post("/v1/messages")
 async def post_message(body: OutMessage, x_internal_token = Depends(credential("messages:send"))):
     require_internal(x_internal_token)
+    if isinstance(x_internal_token, Grant) and x_internal_token.chats and (
+        body.chat_id not in x_internal_token.chats or x_internal_token.scopes != {"messages:send"}
+    ):
+        raise HTTPException(403, "destination-restricted grant cannot use global capabilities")
     if isinstance(x_internal_token, Grant) and "messages:advanced" not in x_internal_token.scopes:
         if body.chat_id not in x_internal_token.chats or body.actions or body.alerts or body.card or body.images or body.parse_mode or body.alert is not None:
             raise HTTPException(403, "plain send to an allowed chat only")
